@@ -251,11 +251,21 @@ public struct ModelDownloadFeature {
 					let recommended = try await transcription.getRecommendedModels().default
 					let names = try await transcription.getAvailableModels()
 					let infos = try await withThrowingTaskGroup(of: ModelInfo.self) { group -> [ModelInfo] in
+						// Check WhisperKit models
 						for name in names {
 							group.addTask {
 								ModelInfo(
 									name: name,
 									isDownloaded: await transcription.isModelDownloaded(name)
+								)
+							}
+						}
+						// Also check Parakeet models for availability
+						for model in ParakeetModel.allCases {
+							group.addTask {
+								ModelInfo(
+									name: model.identifier,
+									isDownloaded: await transcription.isModelDownloaded(model.identifier)
 								)
 							}
 						}

@@ -33,7 +33,7 @@ struct PermissionsSectionView: View {
 			)
 		}
 
-		if store.hotkeyPermissionState.inputMonitoring != .granted {
+		if inputMonitoringPermission != .granted {
 			VStack(alignment: .leading, spacing: 6) {
 				Label {
 					Text("Input Monitoring is required so Hex can listen for your hotkey.")

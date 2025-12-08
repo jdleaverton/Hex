@@ -2,6 +2,27 @@ import Dependencies
 import DependenciesMacros
 import Foundation
 
+// MARK: - Permission Change Events
+
+/// Represents a change in permission status that should trigger a re-check.
+///
+/// Permission changes can occur due to:
+/// - App becoming active (user may have changed permissions in System Settings)
+/// - DistributedNotificationCenter broadcasts (accessibility changes)
+/// - External triggers like CGEventTap failures
+public enum PermissionChange: Equatable, Sendable {
+  /// App became active - should re-check all permissions
+  case appBecameActive
+
+  /// Accessibility permission may have changed (via DistributedNotificationCenter)
+  case accessibilityMayHaveChanged
+
+  /// Explicit request to refresh all permissions
+  case refreshRequested
+}
+
+// MARK: - Permission Client
+
 /// A client for managing system permissions (microphone, accessibility) in a composable way.
 ///
 /// This client provides a unified interface for checking permission status, requesting permissions,
@@ -84,6 +105,21 @@ public struct PermissionClient: Sendable {
   /// - Note: On macOS, the app is killed when permissions change in System Settings,
   ///   so continuous polling is unnecessary. Checking on app activation is sufficient.
   public var observeAppActivation: @Sendable () -> AsyncStream<AppActivation> = { .never }
+
+  /// Observe permission change events.
+  ///
+  /// Returns an `AsyncStream` that yields `PermissionChange` events when permissions
+  /// may have changed. This consolidates multiple sources:
+  /// - App activation (user may have changed permissions in System Settings)
+  /// - DistributedNotificationCenter for accessibility changes (experimental)
+  ///
+  /// Subscribe to this stream and re-check permissions when events are received.
+  public var observePermissionChanges: @Sendable () -> AsyncStream<PermissionChange> = { .never }
+
+  /// Manually trigger a permission refresh.
+  ///
+  /// Use this after requesting a permission to signal that a re-check is needed.
+  public var triggerPermissionRefresh: @Sendable () -> Void = {}
 }
 
 extension DependencyValues {

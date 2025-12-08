@@ -166,20 +166,16 @@ struct AppFeature {
       case .requestAccessibility:
         return .run { send in
           await permissions.requestAccessibility()
-          // Poll for status change (macOS doesn't provide callback)
-          for _ in 0..<10 {
-            try? await Task.sleep(for: .seconds(1))
-            await send(.checkPermissions)
-          }
+          // Trigger permission refresh and use smart retry with exponential backoff
+          permissions.triggerPermissionRefresh()
+          await smartPermissionRetry(send: send, checkFor: .accessibility)
         }
 
       case .requestInputMonitoring:
         return .run { send in
           _ = await permissions.requestInputMonitoring()
-          for _ in 0..<10 {
-            try? await Task.sleep(for: .seconds(1))
-            await send(.checkPermissions)
-          }
+          permissions.triggerPermissionRefresh()
+          await smartPermissionRetry(send: send, checkFor: .inputMonitoring)
         }
 
       case .modelStatusEvaluated:
@@ -260,13 +256,57 @@ struct AppFeature {
       // Initial check on app launch
       await send(.checkPermissions)
 
-      // Monitor app activation events
-      for await activation in permissions.observeAppActivation() {
-        if case .didBecomeActive = activation {
+      // Monitor permission change events (includes app activation + accessibility notifications)
+      for await change in permissions.observePermissionChanges() {
+        switch change {
+        case .appBecameActive:
           await send(.appActivated)
+        case .accessibilityMayHaveChanged:
+          await send(.checkPermissions)
+        case .refreshRequested:
+          await send(.checkPermissions)
         }
       }
+    }
+  }
 
+  /// Smart retry with exponential backoff for permission checks.
+  ///
+  /// Instead of fixed 10x 1-second polling, this uses exponential backoff:
+  /// - Starts at 200ms, doubles each time up to 2 seconds
+  /// - Stops immediately when permission is granted
+  /// - Caps total time at ~30 seconds
+  private enum PermissionToCheck {
+    case accessibility
+    case inputMonitoring
+  }
+
+  private func smartPermissionRetry(send: Send<Action>, checkFor permission: PermissionToCheck) async {
+    var delay: UInt64 = 200_000_000 // Start at 200ms
+    let maxDelay: UInt64 = 2_000_000_000 // Cap at 2 seconds
+    let maxAttempts = 12 // ~30 seconds total with exponential backoff
+
+    for _ in 0..<maxAttempts {
+      try? await Task.sleep(nanoseconds: delay)
+
+      // Check current status
+      let status: PermissionStatus
+      switch permission {
+      case .accessibility:
+        status = permissions.accessibilityStatus()
+      case .inputMonitoring:
+        status = permissions.inputMonitoringStatus()
+      }
+
+      await send(.checkPermissions)
+
+      // Stop early if permission was granted
+      if status == .granted {
+        return
+      }
+
+      // Exponential backoff with cap
+      delay = min(delay * 2, maxDelay)
     }
   }
 
@@ -319,7 +359,7 @@ struct AppView: View {
         .tag(AppFeature.ActiveTab.about)
       }
     } detail: {
-      switch store.state.activeTab {
+      switch store.activeTab {
       case .settings:
         SettingsView(
           store: store.scope(state: \.settings, action: \.settings),

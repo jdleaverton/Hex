@@ -102,9 +102,13 @@ class KeyEventMonitorClientLive {
   private var trustMonitorTask: Task<Void, Never>?
   private var isFnPressed = false
   private var hasPromptedForAccessibilityTrust = false
-  @Shared(.hotkeyPermissionState) private var hotkeyPermissionState: HotkeyPermissionState
 
-  private let trustCheckIntervalNanoseconds: UInt64 = 100_000_000 // 100ms
+  /// Adaptive polling interval - starts fast, slows down when stable
+  private var currentPollInterval: UInt64 = 100_000_000 // Start at 100ms
+  private let fastPollInterval: UInt64 = 100_000_000 // 100ms when permissions unstable
+  private let slowPollInterval: UInt64 = 1_000_000_000 // 1s when permissions stable
+  private var stablePermissionCount = 0
+  private let stableThreshold = 5 // Switch to slow after 5 stable checks
 
   init() {
     logger.info("Initializing HotKeyClient with CGEvent tap.")
@@ -265,13 +269,17 @@ class KeyEventMonitorClientLive {
     await handlePermissionChange(accessibility: last.accessibility, input: last.input, reason: "initial")
 
     while !Task.isCancelled {
-      try? await Task.sleep(nanoseconds: trustCheckIntervalNanoseconds)
+      try? await Task.sleep(nanoseconds: currentPollInterval)
       let current = (
         accessibility: currentAccessibilityTrust(),
         input: currentInputMonitoringTrust()
       )
 
       if current.accessibility != last.accessibility || current.input != last.input {
+        // Permission changed - reset to fast polling
+        stablePermissionCount = 0
+        currentPollInterval = fastPollInterval
+
         let combinedBefore = last.accessibility && last.input
         let combinedAfter = current.accessibility && current.input
         let reason: String
@@ -284,8 +292,19 @@ class KeyEventMonitorClientLive {
         }
         await handlePermissionChange(accessibility: current.accessibility, input: current.input, reason: reason)
         last = current
-      } else if current.accessibility && current.input {
-        await ensureTapIsRunning()
+      } else {
+        // No change - track stability and adapt polling interval
+        if current.accessibility && current.input {
+          stablePermissionCount += 1
+          if stablePermissionCount >= stableThreshold && currentPollInterval != slowPollInterval {
+            currentPollInterval = slowPollInterval
+          }
+          await ensureTapIsRunning()
+        } else {
+          // Permissions not granted, keep fast polling
+          stablePermissionCount = 0
+          currentPollInterval = fastPollInterval
+        }
       }
     }
   }
@@ -324,15 +343,6 @@ class KeyEventMonitorClientLive {
     queue.async(flags: .barrier) { [weak self] in
       self?.accessibilityTrusted = accessibility
       self?.inputMonitoringTrusted = input
-    }
-    recordSharedPermissionState(accessibility: accessibility, input: input)
-  }
-
-  private func recordSharedPermissionState(accessibility: Bool, input: Bool) {
-    $hotkeyPermissionState.withLock {
-      $0.accessibility = accessibility ? .granted : .denied
-      $0.inputMonitoring = input ? .granted : .denied
-      $0.lastUpdated = Date()
     }
   }
 

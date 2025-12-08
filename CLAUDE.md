@@ -118,7 +118,17 @@ FluidAudio models reside under `Application Support/FluidAudio/Models`.
 
 ## Troubleshooting
 
-- Repeated mic prompts during debug: ensure Debug signing uses "Apple Development" so TCC sticks
+### Permission Issues (TCC)
+
+- **Repeated permission prompts during debug**: Ensure Debug signing uses "Apple Development" so TCC grants persist across launches. Ad-hoc or unsigned builds lose TCC state on each run.
+- **Permissions not updating**: macOS typically terminates apps when permissions change in System Settings. The app detects permission changes via:
+  - App activation monitoring (when returning from System Settings)
+  - `DistributedNotificationCenter` for `com.apple.accessibility.api` (experimental)
+  - Adaptive polling in `KeyEventMonitorClient` (100ms → 1s backoff)
+- **Debug logging**: Use Console.app with predicate `subsystem == "com.kitlangton.Hex"` and category `permissions` to see permission state changes.
+
+### Other Issues
+
 - Sandbox network errors (‑1003): add `com.apple.security.network.client = true` (already set)
 - Parakeet not detected: ensure it resides under the container path above; downloading from Hex places it correctly.
 

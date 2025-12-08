@@ -161,10 +161,6 @@ public struct HotKeyProcessor {
     /// 4. Non-matching chord → handle as release or different key
     public mutating func process(keyEvent: KeyEvent) -> Output? {
         // 1) ESC => immediate cancel
-        if keyEvent.key == .escape {
-            let currentState = state
-            hotKeyLogger.notice("ESC pressed while state=\(String(describing: currentState))")
-        }
         if keyEvent.key == .escape, state != .idle {
             isDirty = true
             resetToIdle()

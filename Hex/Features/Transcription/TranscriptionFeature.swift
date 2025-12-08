@@ -247,15 +247,8 @@ private extension TranscriptionFeature {
 
       defer { token.cancel() }
 
-      await withTaskCancellationHandler {
-        do {
-          try await Task.sleep(nanoseconds: .max)
-        } catch {
-          // Cancellation expected
-        }
-      } onCancel: {
-        token.cancel()
-      }
+      // Use AsyncStream.never instead of Task.sleep(.max) which can return immediately
+      for await _ in AsyncStream<Never>.never {}
     }
   }
 

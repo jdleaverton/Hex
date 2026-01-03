@@ -164,8 +164,9 @@ private extension TranscriptionFeature {
       @Shared(.isSettingHotKey) var isSettingHotKey: Bool
       @Shared(.hexSettings) var hexSettings: HexSettings
 
-      // Handle incoming input events (keyboard and mouse)
-      let token = keyEventMonitor.handleInputEvent { inputEvent in
+      // Register a permanent handler that lives for the app's lifetime
+      // (avoids TCA effect cancellation removing the handler prematurely)
+      keyEventMonitor.registerPermanentInputHandler { inputEvent in
         // Skip if the user is currently setting a hotkey
         if isSettingHotKey {
           return false
@@ -237,17 +238,8 @@ private extension TranscriptionFeature {
         }
       }
 
-      defer { token.cancel() }
-
-      await withTaskCancellationHandler {
-        do {
-          try await Task.sleep(nanoseconds: .max)
-        } catch {
-          // Cancellation expected
-        }
-      } onCancel: {
-        token.cancel()
-      }
+      // Keep the effect alive indefinitely
+      try? await Task.sleep(nanoseconds: .max)
     }
   }
 

@@ -55,13 +55,18 @@ struct KeyEventMonitorClient {
   var listenForKeyPress: @Sendable () async -> AsyncThrowingStream<KeyEvent, Error> = { .never }
   var handleKeyEvent: @Sendable (@Sendable @escaping (KeyEvent) -> Bool) -> KeyEventMonitorToken = { _ in .noop }
   var handleInputEvent: @Sendable (@Sendable @escaping (InputEvent) -> Bool) -> KeyEventMonitorToken = { _ in .noop }
+  /// Register a permanent input handler that lives for the app's lifetime (no cleanup on token cancel)
+  var registerPermanentInputHandler: @Sendable (@Sendable @escaping (InputEvent) -> Bool) -> Void = { _ in }
   var startMonitoring: @Sendable () async -> Void = {}
   var stopMonitoring: @Sendable () -> Void = {}
 }
 
 extension KeyEventMonitorClient: DependencyKey {
+  // Singleton to ensure all features share the same event monitor instance
+  private static let sharedLive = KeyEventMonitorClientLive()
+
   static var liveValue: KeyEventMonitorClient {
-    let live = KeyEventMonitorClientLive()
+    let live = sharedLive
     return KeyEventMonitorClient(
       listenForKeyPress: {
         live.listenForKeyPress()
@@ -71,6 +76,9 @@ extension KeyEventMonitorClient: DependencyKey {
       },
       handleInputEvent: { handler in
         live.handleInputEvent(handler)
+      },
+      registerPermanentInputHandler: { handler in
+        live.registerPermanentInputHandler(handler)
       },
       startMonitoring: {
         live.startMonitoring()
@@ -225,6 +233,21 @@ class KeyEventMonitorClientLive {
 
     return KeyEventMonitorToken { [weak self] in
       self?.removeInputContinuation(uuid: uuid)
+    }
+  }
+
+  /// Register a permanent handler that never gets removed (for app-lifetime handlers like hotkey monitoring)
+  func registerPermanentInputHandler(_ handler: @Sendable @escaping (InputEvent) -> Bool) {
+    let uuid = UUID()
+
+    // Use sync to ensure registration completes before returning
+    queue.sync(flags: .barrier) { [self] in
+      self.inputContinuations[uuid] = handler
+    }
+
+    let shouldStart = queue.sync { inputContinuations.count == 1 && continuations.isEmpty }
+    if shouldStart {
+      startMonitoring()
     }
   }
 

@@ -51,6 +51,9 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 	private func startLifecycleTasksIfNeeded() {
 		Task { @MainActor in
 			await HexApp.appStore.send(.task).finish()
+			// Explicitly start transcription hotkey monitoring
+			// (the invisible window's SwiftUI .task doesn't always fire reliably)
+			await HexApp.appStore.send(.transcription(.task)).finish()
 		}
 	}
 

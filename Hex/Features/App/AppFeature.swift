@@ -202,10 +202,8 @@ struct AppFeature {
       defer { token.cancel() }
 
       await withTaskCancellationHandler {
-        do {
-          try await Task.sleep(nanoseconds: .max)
-        } catch {
-          // Expected on cancellation
+        while !Task.isCancelled {
+          try? await Task.sleep(for: .seconds(60))
         }
       } onCancel: {
         token.cancel()
@@ -275,7 +273,7 @@ struct AppView: View {
         Button {
           store.send(.setActiveTab(.remappings))
         } label: {
-          Label("Remappings", systemImage: "text.badge.plus")
+          Label("Transforms", systemImage: "text.badge.plus")
         }
         .buttonStyle(.plain)
         .tag(AppFeature.ActiveTab.remappings)
@@ -308,7 +306,7 @@ struct AppView: View {
         .navigationTitle("Settings")
       case .remappings:
         WordRemappingsView(store: store.scope(state: \.settings, action: \.settings))
-          .navigationTitle("Remappings")
+          .navigationTitle("Transforms")
       case .history:
         HistoryView(store: store.scope(state: \.history, action: \.history))
           .navigationTitle("History")

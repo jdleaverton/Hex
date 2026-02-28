@@ -10,6 +10,12 @@ public enum RecordingAudioBehavior: String, Codable, CaseIterable, Equatable, Se
 public struct HexSettings: Codable, Equatable, Sendable {
 	public static let defaultPasteLastTranscriptHotkey = HotKey(key: .v, modifiers: [.option, .shift])
 	public static let baseSoundEffectsVolume: Double = HexCoreConstants.baseSoundEffectsVolume
+	public static let defaultWordRemovals: [WordRemoval] = [
+		.init(pattern: "uh+"),
+		.init(pattern: "um+"),
+		.init(pattern: "er+"),
+		.init(pattern: "hm+")
+	]
 
 	public static var defaultPasteLastTranscriptHotkeyDescription: String {
 		let modifiers = defaultPasteLastTranscriptHotkey.modifiers.sorted.map { $0.stringValue }.joined()
@@ -29,6 +35,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var minimumKeyTime: Double
 	public var copyToClipboard: Bool
 	public var useDoubleTapOnly: Bool
+	public var doubleTapLockEnabled: Bool
 	public var outputLanguage: String?
 	public var selectedMicrophoneID: String?
 	public var saveTranscriptionHistory: Bool
@@ -36,7 +43,15 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var pasteLastTranscriptHotkey: HotKey?
 	public var hasCompletedModelBootstrap: Bool
 	public var hasCompletedStorageMigration: Bool
+	public var wordRemovalsEnabled: Bool
+	public var wordRemovals: [WordRemoval]
 	public var wordRemappings: [WordRemapping]
+
+	private mutating func normalizeDoubleTapSettings() {
+		if !doubleTapLockEnabled {
+			useDoubleTapOnly = false
+		}
+	}
 
 	public init(
 		soundEffectsEnabled: Bool = true,
@@ -51,6 +66,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		minimumKeyTime: Double = HexCoreConstants.defaultMinimumKeyTime,
 		copyToClipboard: Bool = false,
 		useDoubleTapOnly: Bool = false,
+		doubleTapLockEnabled: Bool = true,
 		outputLanguage: String? = nil,
 		selectedMicrophoneID: String? = nil,
 		saveTranscriptionHistory: Bool = true,
@@ -58,6 +74,8 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		pasteLastTranscriptHotkey: HotKey? = HexSettings.defaultPasteLastTranscriptHotkey,
 		hasCompletedModelBootstrap: Bool = false,
 		hasCompletedStorageMigration: Bool = false,
+		wordRemovalsEnabled: Bool = false,
+		wordRemovals: [WordRemoval] = HexSettings.defaultWordRemovals,
 		wordRemappings: [WordRemapping] = []
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled
@@ -72,6 +90,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.minimumKeyTime = minimumKeyTime
 		self.copyToClipboard = copyToClipboard
 		self.useDoubleTapOnly = useDoubleTapOnly
+		self.doubleTapLockEnabled = doubleTapLockEnabled
 		self.outputLanguage = outputLanguage
 		self.selectedMicrophoneID = selectedMicrophoneID
 		self.saveTranscriptionHistory = saveTranscriptionHistory
@@ -79,7 +98,10 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.pasteLastTranscriptHotkey = pasteLastTranscriptHotkey
 		self.hasCompletedModelBootstrap = hasCompletedModelBootstrap
 		self.hasCompletedStorageMigration = hasCompletedStorageMigration
+		self.wordRemovalsEnabled = wordRemovalsEnabled
+		self.wordRemovals = wordRemovals
 		self.wordRemappings = wordRemappings
+		normalizeDoubleTapSettings()
 	}
 
 	public init(from decoder: Decoder) throws {
@@ -88,6 +110,7 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		for field in HexSettingsSchema.fields {
 			try field.decode(into: &self, from: container)
 		}
+		normalizeDoubleTapSettings()
 	}
 
 	public func encode(to encoder: Encoder) throws {
@@ -114,6 +137,7 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case minimumKeyTime
 	case copyToClipboard
 	case useDoubleTapOnly
+	case doubleTapLockEnabled
 	case outputLanguage
 	case selectedMicrophoneID
 	case saveTranscriptionHistory
@@ -121,6 +145,8 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case pasteLastTranscriptHotkey
 	case hasCompletedModelBootstrap
 	case hasCompletedStorageMigration
+	case wordRemovalsEnabled
+	case wordRemovals
 	case wordRemappings
 }
 
@@ -207,6 +233,7 @@ private enum HexSettingsSchema {
 		SettingsField(.minimumKeyTime, keyPath: \.minimumKeyTime, default: defaults.minimumKeyTime).eraseToAny(),
 		SettingsField(.copyToClipboard, keyPath: \.copyToClipboard, default: defaults.copyToClipboard).eraseToAny(),
 		SettingsField(.useDoubleTapOnly, keyPath: \.useDoubleTapOnly, default: defaults.useDoubleTapOnly).eraseToAny(),
+		SettingsField(.doubleTapLockEnabled, keyPath: \.doubleTapLockEnabled, default: defaults.doubleTapLockEnabled).eraseToAny(),
 		SettingsField(
 			.outputLanguage,
 			keyPath: \.outputLanguage,
@@ -242,6 +269,12 @@ private enum HexSettingsSchema {
 		).eraseToAny(),
 		SettingsField(.hasCompletedModelBootstrap, keyPath: \.hasCompletedModelBootstrap, default: defaults.hasCompletedModelBootstrap).eraseToAny(),
 		SettingsField(.hasCompletedStorageMigration, keyPath: \.hasCompletedStorageMigration, default: defaults.hasCompletedStorageMigration).eraseToAny(),
+		SettingsField(.wordRemovalsEnabled, keyPath: \.wordRemovalsEnabled, default: defaults.wordRemovalsEnabled).eraseToAny(),
+		SettingsField(
+			.wordRemovals,
+			keyPath: \.wordRemovals,
+			default: defaults.wordRemovals
+		).eraseToAny(),
 		SettingsField(
 			.wordRemappings,
 			keyPath: \.wordRemappings,

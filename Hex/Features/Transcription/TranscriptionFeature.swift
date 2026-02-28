@@ -174,7 +174,9 @@ private extension TranscriptionFeature {
 
         // Always keep hotKeyProcessor in sync with current user hotkey preference
         hotKeyProcessor.hotkey = hexSettings.hotkey
-        hotKeyProcessor.useDoubleTapOnly = hexSettings.useDoubleTapOnly
+        let useDoubleTapOnly = hexSettings.doubleTapLockEnabled && hexSettings.useDoubleTapOnly
+        hotKeyProcessor.doubleTapLockEnabled = hexSettings.doubleTapLockEnabled
+        hotKeyProcessor.useDoubleTapOnly = useDoubleTapOnly
         hotKeyProcessor.minimumKeyTime = hexSettings.minimumKeyTime
 
         switch inputEvent {
@@ -198,7 +200,7 @@ private extension TranscriptionFeature {
             }
             // If the hotkey is purely modifiers, return false to keep it from interfering with normal usage
             // But if useDoubleTapOnly is true, always intercept the key
-            return hexSettings.useDoubleTapOnly || keyEvent.key != nil
+            return useDoubleTapOnly || keyEvent.key != nil
 
           case .stopRecording:
             Task { await send(.hotKeyReleased) }
@@ -238,8 +240,15 @@ private extension TranscriptionFeature {
         }
       }
 
-      // Keep the effect alive indefinitely
-      try? await Task.sleep(nanoseconds: .max)
+      defer { token.cancel() }
+
+      await withTaskCancellationHandler {
+        while !Task.isCancelled {
+          try? await Task.sleep(for: .seconds(60))
+        }
+      } onCancel: {
+        token.cancel()
+      }
     }
   }
 
@@ -403,18 +412,30 @@ private extension TranscriptionFeature {
 
     transcriptionFeatureLogger.info("Raw transcription: '\(result)'")
     let remappings = state.hexSettings.wordRemappings
-    let remappedResult: String
+    let removalsEnabled = state.hexSettings.wordRemovalsEnabled
+    let removals = state.hexSettings.wordRemovals
+    let modifiedResult: String
     if state.isRemappingScratchpadFocused {
-      remappedResult = result
-      transcriptionFeatureLogger.info("Scratchpad focused; skipping remappings")
+      modifiedResult = result
+      transcriptionFeatureLogger.info("Scratchpad focused; skipping word modifications")
     } else {
-      remappedResult = WordRemappingApplier.apply(result, remappings: remappings)
-      if remappedResult != result {
+      var output = result
+      if removalsEnabled {
+        let removedResult = WordRemovalApplier.apply(output, removals: removals)
+        if removedResult != output {
+          let enabledRemovalCount = removals.filter(\.isEnabled).count
+          transcriptionFeatureLogger.info("Applied \(enabledRemovalCount) word removal(s)")
+        }
+        output = removedResult
+      }
+      let remappedResult = WordRemappingApplier.apply(output, remappings: remappings)
+      if remappedResult != output {
         transcriptionFeatureLogger.info("Applied \(remappings.count) word remapping(s)")
       }
+      modifiedResult = remappedResult
     }
 
-    guard !remappedResult.isEmpty else {
+    guard !modifiedResult.isEmpty else {
       return .none
     }
 
@@ -425,7 +446,7 @@ private extension TranscriptionFeature {
     return .run { send in
       do {
         try await finalizeRecordingAndStoreTranscript(
-          result: remappedResult,
+          result: modifiedResult,
           duration: duration,
           sourceAppBundleID: sourceAppBundleID,
           sourceAppName: sourceAppName,

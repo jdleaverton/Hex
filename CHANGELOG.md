@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.6.10
+
+### Patch Changes
+
+- c018c40: Add setting to disable double-tap lock for hands-free recording
+- 7af7cd9: Update dependencies: TCA 1.23, Sparkle 2.8, swift-dependencies 1.11
+
+## 0.6.9
+
+### Patch Changes
+
+- 74893ab: Support escape sequences (\n, \t, \\) in word remappings for newlines, tabs, and literal backslashes (#140)
+
+## 0.6.8
+
+### Patch Changes
+
+- e2000d8: Fix Icon Composer app icon not displaying (#148)
+- 75bc323: Update macOS Tahoe app icon (#145)
+
+## 0.6.7
+
+### Patch Changes
+
+- cc99650: Prepare release metadata for 0.6.6
+
+## 0.6.6
+
+### Patch Changes
+
+- 3b6c966: Improve transcript modifications layout and remove log export settings
+- 3b6c966: Add opt-in regex word removals for transcripts (#121)
+
 ## 0.6.5
 
 ### Patch Changes

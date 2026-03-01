@@ -10,7 +10,7 @@ actor ParakeetClient {
   private var currentVariant: ParakeetModel?
   private let logger = HexLog.parakeet
   private let vendorDirs = [
-    // Our app-specific cache path convention (under XDG or com.kitlangton.Hex/cache)
+    // Our app-specific cache path convention (under XDG or {bundleID}/cache)
     "fluidaudio/Models",
     "FluidAudio/Models",
     // FluidAudio default under Application Support root
@@ -113,7 +113,52 @@ actor ParakeetClient {
     logger.notice("Transcribing with Parakeet file=\(url.lastPathComponent)")
     let result = try await asr.transcribe(url)
     logger.info("Parakeet transcription finished in \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
-    return result.text
+    return Self.cleanChunkBoundaryArtifacts(result.text)
+  }
+
+  /// Transcribe raw 16 kHz mono Float32 samples directly, skipping file I/O.
+  /// FluidAudio's ChunkProcessor handles chunking internally for audio >15s
+  /// with ~15s windows, 2s overlap, and 3-tier merge (contiguous/LCS/midpoint).
+  func transcribe(samples: [Float]) async throws -> String {
+    guard let asr else { throw NSError(domain: "Parakeet", code: -1, userInfo: [NSLocalizedDescriptionKey: "Parakeet not initialized"]) }
+    let t0 = Date()
+    let sampleCount = samples.count
+    let durationSec = Double(sampleCount) / 16000.0
+    logger.notice("Transcribing with Parakeet samples=\(sampleCount) (~\(String(format: "%.1f", durationSec))s)")
+    let result = try await asr.transcribe(samples)
+    logger.info("Parakeet buffer transcription finished in \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
+    return Self.cleanChunkBoundaryArtifacts(result.text)
+  }
+
+  /// Cleans up artifacts from FluidAudio's ChunkProcessor merge.
+  ///
+  /// When audio is split into ~15s chunks, the TDT decoder appends a period at each
+  /// chunk boundary (thinking it's the end of the utterance). The 3-tier merge keeps
+  /// these as legitimate tokens, producing mid-word periods like "t.ier" or "m.erge".
+  ///
+  /// This removes periods that appear between two letters with no surrounding spaces,
+  /// which are always chunk boundary artifacts, never real punctuation.
+  private static func cleanChunkBoundaryArtifacts(_ text: String) -> String {
+    // Pattern: a letter, then period, then a lowercase letter — always a chunk artifact.
+    // Real sentence-ending periods are followed by a space or end-of-string.
+    // Abbreviations like "U.S." have periods after uppercase letters (not matched).
+    guard let regex = try? NSRegularExpression(pattern: #"(\p{L})\.(\p{Ll})"#) else {
+      return text
+    }
+    let range = NSRange(text.startIndex..., in: text)
+    return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "$1$2")
+  }
+
+  /// Run a short silent transcription to prime the ANE pipeline.
+  /// Call after ensureLoaded() so the first real transcription is fast.
+  func warmup() async {
+    guard let asr else { return }
+    let t0 = Date()
+    logger.debug("Warming up Parakeet ANE pipeline...")
+    // Minimum 1s (16000 samples) of silence to trigger full inference path
+    let silence = [Float](repeating: 0, count: 16000)
+    _ = try? await asr.transcribe(silence)
+    logger.notice("Parakeet ANE warmup completed in \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
   }
 
   // Delete cached Parakeet models from known locations and reset state
@@ -166,7 +211,8 @@ actor ParakeetClient {
     let fm = FileManager.default
     let xdg = ProcessInfo.processInfo.environment["XDG_CACHE_HOME"].flatMap { URL(fileURLWithPath: $0, isDirectory: true) }
     let appSupport = try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: false)
-    let appCache = appSupport?.appendingPathComponent("com.kitlangton.Hex/cache", isDirectory: true)
+    let bundleID = Bundle.main.bundleIdentifier ?? "com.jdleaverton.Hex"
+    let appCache = appSupport?.appendingPathComponent("\(bundleID)/cache", isDirectory: true)
     let userCache = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cache", isDirectory: true)
     return [xdg, appCache, appSupport, userCache].compactMap { $0 }
   }
@@ -193,6 +239,8 @@ actor ParakeetClient {
     )
   }
   func transcribe(_ url: URL) async throws -> String { throw NSError(domain: "Parakeet", code: -3, userInfo: [NSLocalizedDescriptionKey: "Parakeet not available"]) }
+  func transcribe(samples: [Float]) async throws -> String { throw NSError(domain: "Parakeet", code: -3, userInfo: [NSLocalizedDescriptionKey: "Parakeet not available"]) }
+  func warmup() async {}
   func deleteCaches(modelName: String) async throws {}
 }
 

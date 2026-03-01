@@ -96,9 +96,17 @@ struct TranscriptionFeature {
       // MARK: - HotKey Flow
 
       case .hotKeyPressed:
-        // If we're transcribing, send a cancel first. Otherwise start recording immediately.
-        // We'll decide later (on release) whether to keep or discard the recording.
-        return handleHotKeyPressed(isTranscribing: state.isTranscribing)
+        // If we're transcribing, cancel first then start recording in sequence.
+        // Otherwise start recording DIRECTLY (no extra action dispatch) to minimize
+        // latency under CPU/memory stress.
+        if state.isTranscribing {
+          return .concatenate(
+            handleCancel(&state),
+            .send(.startRecording)
+          )
+        } else {
+          return handleStartRecording(&state)
+        }
 
       case .hotKeyReleased:
         // If we're currently recording, then stop. Otherwise, just cancel
@@ -240,14 +248,9 @@ private extension TranscriptionFeature {
         }
       }
 
-      defer { token.cancel() }
-
-      await withTaskCancellationHandler {
-        while !Task.isCancelled {
-          try? await Task.sleep(for: .seconds(60))
-        }
-      } onCancel: {
-        token.cancel()
+      // Keep the effect alive — the permanent handler lives independently
+      while !Task.isCancelled {
+        try? await Task.sleep(for: .seconds(60))
       }
     }
   }
@@ -259,16 +262,9 @@ private extension TranscriptionFeature {
   }
 }
 
-// MARK: - HotKey Press/Release Handlers
+// MARK: - HotKey Release Handler
 
 private extension TranscriptionFeature {
-  func handleHotKeyPressed(isTranscribing: Bool) -> Effect<Action> {
-    // If already transcribing, cancel first. Otherwise start recording immediately.
-    let maybeCancel = isTranscribing ? Effect.send(Action.cancel) : .none
-    let startRecording = Effect.send(Action.startRecording)
-    return .merge(maybeCancel, startRecording)
-  }
-
   func handleHotKeyReleased(isRecording: Bool) -> Effect<Action> {
     // Always stop recording when hotkey is released
     return isRecording ? .send(.stopRecording) : .none
@@ -298,13 +294,15 @@ private extension TranscriptionFeature {
 
     // Prevent system sleep during recording
     return .run { [sleepManagement, preventSleep = state.hexSettings.preventSystemSleep] send in
-      // Play sound immediately for instant feedback
+      // Start recording FIRST to capture audio immediately
+      await recording.startRecording()
+
+      // Play sound after recording has started (won't block capture)
       soundEffect.play(.startRecording)
 
       if preventSleep {
         await sleepManagement.preventSleep(reason: "Hex Voice Recording")
       }
-      await recording.startRecording()
     }
   }
 

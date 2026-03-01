@@ -83,8 +83,7 @@ actor TranscriptionClientLive {
         appropriateFor: nil,
         create: true
       )
-      // Typically: .../Application Support/com.kitlangton.Hex
-      let ourAppFolder = appSupportURL.appendingPathComponent("com.kitlangton.Hex", isDirectory: true)
+      let ourAppFolder = appSupportURL.appendingPathComponent(HexLog.appIdentifier, isDirectory: true)
       // Inside there, store everything in /models
       let baseURL = ourAppFolder.appendingPathComponent("models", isDirectory: true)
       try FileManager.default.createDirectory(at: baseURL, withIntermediateDirectories: true)
@@ -101,8 +100,13 @@ actor TranscriptionClientLive {
   func downloadAndLoadModel(variant: String, progressCallback: @escaping (Progress) -> Void) async throws {
     // If Parakeet, use Parakeet client path
     if isParakeet(variant) {
+      let wasLoaded = currentModelName == variant
       try await parakeet.ensureLoaded(modelName: variant, progress: progressCallback)
       currentModelName = variant
+      // Prime the ANE pipeline on first load so the first real transcription is fast
+      if !wasLoaded {
+        await parakeet.warmup()
+      }
       return
     }
     // Resolve wildcard patterns (e.g., "distil*large-v3") to a concrete variant
@@ -239,6 +243,7 @@ actor TranscriptionClientLive {
     progressCallback: @escaping (Progress) -> Void
   ) async throws -> String {
     let startAll = Date()
+
     if isParakeet(model) {
       transcriptionLogger.notice("Transcribing with Parakeet model=\(model) file=\(url.lastPathComponent)")
       let startLoad = Date()
@@ -246,21 +251,26 @@ actor TranscriptionClientLive {
         progressCallback(p)
       }
       transcriptionLogger.info("Parakeet ensureLoaded took \(String(format: "%.2f", Date().timeIntervalSince(startLoad)))s")
-      let preparedClip = try ParakeetClipPreparer.ensureMinimumDuration(url: url, logger: parakeetLogger)
-      defer { preparedClip.cleanup() }
+
+      // Read audio into memory and prepend silence so the model doesn't clip
+      // the first word. Then pass raw samples directly to Parakeet — this
+      // skips redundant file I/O and lets FluidAudio's ChunkProcessor handle
+      // long audio internally (~15s chunks, 2s overlap, 3-tier merge).
       let startTx = Date()
-      let text = try await parakeet.transcribe(preparedClip.url)
+      let samples = try AudioPreparer.readAndPrependSilence(url: url)
+      transcriptionLogger.debug("Audio prepared: \(samples.count) samples (\(String(format: "%.1f", Double(samples.count) / 16000.0))s)")
+      let text = try await parakeet.transcribe(samples: samples)
       transcriptionLogger.info("Parakeet transcription took \(String(format: "%.2f", Date().timeIntervalSince(startTx)))s")
       transcriptionLogger.info("Parakeet request total elapsed \(String(format: "%.2f", Date().timeIntervalSince(startAll)))s")
       return text
     }
+
     let model = await resolveVariant(model)
     // Load or switch to the required model if needed.
     if whisperKit == nil || model != currentModelName {
       unloadCurrentModel()
       let startLoad = Date()
       try await downloadAndLoadModel(variant: model) { p in
-        // Debug logging, or scale as desired:
         progressCallback(p)
       }
       let loadDuration = Date().timeIntervalSince(startLoad)
@@ -277,10 +287,14 @@ actor TranscriptionClientLive {
       )
     }
 
-    // Perform the transcription.
-    transcriptionLogger.notice("Transcribing with WhisperKit model=\(model) file=\(url.lastPathComponent)")
+    // For WhisperKit, prepend silence via file (it takes a path, not samples).
+    // WhisperKit's VAD chunking handles long audio internally.
+    let prePadded = try AudioPreparer.prependSilence(url: url)
+    defer { prePadded.cleanup() }
+
+    transcriptionLogger.notice("Transcribing with WhisperKit model=\(model) file=\(prePadded.url.lastPathComponent)")
     let startTx = Date()
-    let results = try await whisperKit.transcribe(audioPath: url.path, decodeOptions: options)
+    let results = try await whisperKit.transcribe(audioPath: prePadded.url.path, decodeOptions: options)
     transcriptionLogger.info("WhisperKit transcription took \(String(format: "%.2f", Date().timeIntervalSince(startTx)))s")
     transcriptionLogger.info("WhisperKit request total elapsed \(String(format: "%.2f", Date().timeIntervalSince(startAll)))s")
 

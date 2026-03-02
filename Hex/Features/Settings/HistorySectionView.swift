@@ -1,10 +1,14 @@
 import ComposableArchitecture
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 import HexCore
 
 struct HistorySectionView: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 	@Bindable var store: StoreOf<SettingsFeature>
 
 	var body: some View {
@@ -62,12 +66,16 @@ struct HistorySectionView: View {
 					.foregroundColor(.secondary)
 			}
 		}
-		.enableInjection()
+#if DEBUG
+	.enableInjection()
+#endif
 	}
 }
 
 private struct PasteLastTranscriptHotkeyRow: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 	@Bindable var store: StoreOf<SettingsFeature>
 
 	var body: some View {
@@ -119,6 +127,8 @@ private struct PasteLastTranscriptHotkeyRow: View {
 				.foregroundStyle(.secondary)
 			}
 		}
-		.enableInjection()
+#if DEBUG
+	.enableInjection()
+#endif
 	}
 }

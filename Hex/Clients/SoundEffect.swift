@@ -140,7 +140,7 @@ actor SoundEffectsClientLive {
     if !isEngineRunning || !engine.isRunning {
       engine.prepare()
       if #available(macOS 13.0, *) {
-        engine.isAutoShutdownEnabled = false
+        engine.isAutoShutdownEnabled = true
       }
       do {
         try engine.start()

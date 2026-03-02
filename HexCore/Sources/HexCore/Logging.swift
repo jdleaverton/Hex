@@ -1,8 +1,11 @@
+import Foundation
 import os.log
 
 /// Shared helper for creating consistent os.Logger instances across the Hex app and HexCore.
 public enum HexLog {
-  public static let subsystem = "com.kitlangton.Hex"
+  /// The app's bundle identifier, resolved at runtime. Falls back to a sensible default.
+  public static let appIdentifier: String = Bundle.main.bundleIdentifier ?? "com.jdleaverton.Hex"
+  public static let subsystem = appIdentifier
 
   public enum Category: String {
     case app = "App"

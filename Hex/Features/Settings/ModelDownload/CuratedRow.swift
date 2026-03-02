@@ -1,10 +1,14 @@
 import ComposableArchitecture
 import Darwin
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 
 struct CuratedRow: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 	@Bindable var store: StoreOf<ModelDownloadFeature>
 	let model: CuratedModelInfo
 
@@ -120,6 +124,8 @@ struct CuratedRow: View {
 				}
 			}
 		}
+#if DEBUG
 		.enableInjection()
+#endif
 	}
 }

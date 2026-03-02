@@ -42,10 +42,9 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
 		// Start long-running app effects (global hotkeys, permissions, etc.)
 		startLifecycleTasksIfNeeded()
 
-		// Then present main views
+		// Present the invisible transcription overlay; settings window
+		// is created on demand when the user opens it from the menu bar.
 		presentMainView()
-		presentSettingsView()
-		NSApp.activate(ignoringOtherApps: true)
 	}
 
 	private func startLifecycleTasksIfNeeded() {
@@ -67,7 +66,8 @@ class HexAppDelegate: NSObject, NSApplicationDelegate {
                 appropriateFor: nil,
                 create: true
             )
-            let cache = support.appendingPathComponent("com.kitlangton.Hex/cache", isDirectory: true)
+            let bundleID = Bundle.main.bundleIdentifier ?? "com.jdleaverton.Hex"
+            let cache = support.appendingPathComponent("\(bundleID)/cache", isDirectory: true)
             try FileManager.default.createDirectory(at: cache, withIntermediateDirectories: true)
             setenv("XDG_CACHE_HOME", cache.path, 1)
             cacheLogger.info("XDG_CACHE_HOME set to \(cache.path)")

@@ -6,13 +6,17 @@
 //
 
 import HexCore
+#if DEBUG
 import Inject
+#endif
 import Sauce
 import SwiftUI
 
 // This view shows the actual "keys" in a more modern, subtle style.
 struct HotKeyView: View {
+#if DEBUG
   @ObserveInjection var inject
+#endif
   var modifiers: Modifiers
   var key: Key?
   var isActive: Bool
@@ -58,12 +62,16 @@ struct HotKeyView: View {
     .animation(.bouncy(duration: 0.3), value: key)
     .animation(.bouncy(duration: 0.3), value: modifiers)
     .animation(.bouncy(duration: 0.3), value: isActive)
+#if DEBUG
     .enableInjection()
+#endif
   }
 }
 
 struct KeyView: View {
+#if DEBUG
   @ObserveInjection var inject
+#endif
   var text: String
 
   var body: some View {
@@ -81,7 +89,9 @@ struct KeyView: View {
           )
       )
       .shadow(radius: 4, y: 2)
+#if DEBUG
       .enableInjection()
+#endif
   }
 }
 

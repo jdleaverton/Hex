@@ -20,7 +20,7 @@ extension URL {
 				appropriateFor: nil,
 				create: true
 			)
-			let hexDir = appSupport.appending(component: "com.kitlangton.Hex")
+			let hexDir = appSupport.appending(component: HexLog.appIdentifier)
 			try fm.createDirectory(at: hexDir, withIntermediateDirectories: true)
 			return hexDir
 		}

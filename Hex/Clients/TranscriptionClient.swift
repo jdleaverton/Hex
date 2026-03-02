@@ -74,6 +74,10 @@ actor TranscriptionClientLive {
   private var currentModelName: String?
   private var parakeet: ParakeetClient = ParakeetClient()
 
+  /// Timer that fires after idle period to unload the model from memory
+  private var idleUnloadTask: Task<Void, Never>?
+  private static let idleUnloadDelay: Duration = .seconds(60)
+
   /// The base folder under which we store model data (e.g., ~/Library/Application Support/...).
   private lazy var modelsBaseFolder: URL = {
     do {
@@ -157,7 +161,7 @@ actor TranscriptionClientLive {
   func deleteModel(variant: String) async throws {
     if isParakeet(variant) {
       try await parakeet.deleteCaches(modelName: variant)
-      if currentModelName == variant { unloadCurrentModel() }
+      if currentModelName == variant { await unloadCurrentModel() }
       return
     }
     let modelFolder = modelPath(for: variant)
@@ -170,7 +174,7 @@ actor TranscriptionClientLive {
 
     // If this is the currently loaded model, unload it first
     if currentModelName == variant {
-      unloadCurrentModel()
+      await unloadCurrentModel()
     }
 
     // Delete the model directory
@@ -244,6 +248,9 @@ actor TranscriptionClientLive {
   ) async throws -> String {
     let startAll = Date()
 
+    // Cancel any pending idle unload since we're about to use the model
+    idleUnloadTask?.cancel()
+
     if isParakeet(model) {
       transcriptionLogger.notice("Transcribing with Parakeet model=\(model) file=\(url.lastPathComponent)")
       let startLoad = Date()
@@ -262,13 +269,14 @@ actor TranscriptionClientLive {
       let text = try await parakeet.transcribe(samples: samples)
       transcriptionLogger.info("Parakeet transcription took \(String(format: "%.2f", Date().timeIntervalSince(startTx)))s")
       transcriptionLogger.info("Parakeet request total elapsed \(String(format: "%.2f", Date().timeIntervalSince(startAll)))s")
+      scheduleIdleUnload()
       return text
     }
 
     let model = await resolveVariant(model)
     // Load or switch to the required model if needed.
     if whisperKit == nil || model != currentModelName {
-      unloadCurrentModel()
+      await unloadCurrentModel()
       let startLoad = Date()
       try await downloadAndLoadModel(variant: model) { p in
         progressCallback(p)
@@ -300,6 +308,7 @@ actor TranscriptionClientLive {
 
     // Concatenate results from all segments.
     let text = results.map(\.text).joined(separator: " ")
+    scheduleIdleUnload()
     return text
   }
 
@@ -343,9 +352,26 @@ actor TranscriptionClientLive {
   }
 
   // Unloads any currently loaded model (clears `whisperKit` and `currentModelName`).
-  private func unloadCurrentModel() {
+  private func unloadCurrentModel() async {
     whisperKit = nil
+    await parakeet.unload()
     currentModelName = nil
+    modelsLogger.info("Unloaded model from memory")
+  }
+
+  /// Resets the idle timer. Call after every transcription completes.
+  private func scheduleIdleUnload() {
+    idleUnloadTask?.cancel()
+    idleUnloadTask = Task { [weak self] in
+      try? await Task.sleep(for: Self.idleUnloadDelay)
+      guard !Task.isCancelled else { return }
+      await self?.idleUnload()
+    }
+  }
+
+  private func idleUnload() async {
+    modelsLogger.notice("Idle timeout reached — unloading model to reclaim memory")
+    await unloadCurrentModel()
   }
 
   /// Downloads the model to a temporary folder (if it isn't already on disk),

@@ -12,6 +12,8 @@
 	<string>79</string>
 	<key>NSAccessibilityUsageDescription</key>
 	<string>Hex needs accessibility access to monitor keyboard events for hotkey detection.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Hex needs microphone access to record and transcribe your voice.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsArbitraryLoads</key>

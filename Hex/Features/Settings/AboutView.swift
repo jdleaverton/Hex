@@ -1,10 +1,14 @@
 import ComposableArchitecture
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 import Sparkle
 
 struct AboutView: View {
+#if DEBUG
     @ObserveInjection var inject
+#endif
     @Bindable var store: StoreOf<SettingsFeature>
     @State var viewModel = CheckForUpdatesViewModel.shared
     @State private var showingChangelog = false
@@ -48,6 +52,8 @@ struct AboutView: View {
             }
         }
         .formStyle(.grouped)
+#if DEBUG
         .enableInjection()
+#endif
     }
 }

@@ -1,11 +1,15 @@
 import SwiftUI
+#if DEBUG
 import Inject
+#endif
 #if canImport(ComposableArchitecture)
 	import ComposableArchitecture
 #endif
 
 struct LanguageSectionView: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 	@Bindable var store: StoreOf<SettingsFeature>
 
 	var body: some View {
@@ -19,6 +23,8 @@ struct LanguageSectionView: View {
 		} icon: {
 			Image(systemName: "globe")
 		}
-		.enableInjection()
+#if DEBUG
+	.enableInjection()
+#endif
 	}
 }

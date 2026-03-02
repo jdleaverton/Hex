@@ -1,9 +1,13 @@
 import ComposableArchitecture
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 
 struct CuratedList: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 	@Bindable var store: StoreOf<ModelDownloadFeature>
 
 	private var visibleModels: [CuratedModelInfo] {
@@ -39,7 +43,9 @@ struct CuratedList: View {
 				.foregroundStyle(.secondary)
 			}
 		}
+#if DEBUG
 		.enableInjection()
+#endif
 	}
 }
 

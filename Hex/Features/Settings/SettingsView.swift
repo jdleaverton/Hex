@@ -1,10 +1,14 @@
 import ComposableArchitecture
 import HexCore
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 
 struct SettingsView: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 	@Bindable var store: StoreOf<SettingsFeature>
 	let microphonePermission: PermissionStatus
 	let accessibilityPermission: PermissionStatus
@@ -43,7 +47,9 @@ struct SettingsView: View {
 		.task {
 			await store.send(.task).finish()
 		}
-		.enableInjection()
+#if DEBUG
+	.enableInjection()
+#endif
 	}
 }
 

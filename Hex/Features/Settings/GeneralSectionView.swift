@@ -1,10 +1,14 @@
 import ComposableArchitecture
 import HexCore
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 
 struct GeneralSectionView: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 	@Bindable var store: StoreOf<SettingsFeature>
 
 	var body: some View {
@@ -74,6 +78,8 @@ struct GeneralSectionView: View {
 		} header: {
 			Text("General")
 		}
-		.enableInjection()
+#if DEBUG
+	.enableInjection()
+#endif
 	}
 }

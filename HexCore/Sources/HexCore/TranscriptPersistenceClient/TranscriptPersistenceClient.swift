@@ -28,7 +28,7 @@ extension TranscriptPersistenceClient: DependencyKey {
                     appropriateFor: nil,
                     create: true
                 )
-                let ourAppFolder = supportDir.appendingPathComponent("com.kitlangton.Hex", isDirectory: true)
+                let ourAppFolder = supportDir.appendingPathComponent(HexLog.appIdentifier, isDirectory: true)
                 let recordingsFolder = ourAppFolder.appendingPathComponent("Recordings", isDirectory: true)
                 try fm.createDirectory(at: recordingsFolder, withIntermediateDirectories: true)
                 

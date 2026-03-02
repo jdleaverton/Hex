@@ -1,10 +1,14 @@
 import ComposableArchitecture
 import HexCore
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 
 struct HotKeySectionView: View {
+#if DEBUG
     @ObserveInjection var inject
+#endif
     @Bindable var store: StoreOf<SettingsFeature>
 
     var body: some View {
@@ -67,12 +71,16 @@ struct HotKeySectionView: View {
                 }
             }
         }
+#if DEBUG
         .enableInjection()
+#endif
     }
 }
 
 private struct ModifierSideControls: View {
+#if DEBUG
     @ObserveInjection var inject
+#endif
     var modifiers: Modifiers
     var onSelect: (Modifier.Kind, Modifier.Side) -> Void
 
@@ -101,6 +109,8 @@ private struct ModifierSideControls: View {
                 }
             }
         }
+#if DEBUG
         .enableInjection()
+#endif
     }
 }

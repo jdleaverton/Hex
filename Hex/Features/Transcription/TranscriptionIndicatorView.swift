@@ -4,12 +4,16 @@
 //
 //  Created by Kit Langton on 1/25/25.
 
+#if DEBUG
 import Inject
+#endif
 import Pow
 import SwiftUI
 
 struct TranscriptionIndicatorView: View {
+#if DEBUG
   @ObserveInjection var inject
+#endif
   
   enum Status {
     case hidden
@@ -116,7 +120,7 @@ struct TranscriptionIndicatorView: View {
         .opacity(status == .hidden ? 0 : 1)
         .scaleEffect(status == .hidden ? 0.0 : 1)
         .blur(radius: status == .hidden ? 4 : 0)
-        .animation(.bouncy(duration: 0.3), value: status)
+        .animation(.bouncy(duration: 0.15), value: status)
         .changeEffect(.glow(color: .red.opacity(0.5), radius: 8), value: status)
         .changeEffect(.shine(angle: .degrees(0), duration: 0.6), value: transcribeEffect)
         .compositingGroup()
@@ -145,7 +149,9 @@ struct TranscriptionIndicatorView: View {
         .zIndex(2)
       }
     }
+#if DEBUG
     .enableInjection()
+#endif
   }
 }
 

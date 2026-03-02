@@ -1,10 +1,14 @@
 import ComposableArchitecture
 import HexCore
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 
 struct WordRemappingsView: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 	@Bindable var store: StoreOf<SettingsFeature>
 	@FocusState private var isScratchpadFocused: Bool
 	@State private var activeSection: ModificationSection = .removals
@@ -75,7 +79,9 @@ struct WordRemappingsView: View {
 		.onDisappear {
 			store.send(.setRemappingScratchpadFocused(false))
 		}
+#if DEBUG
 		.enableInjection()
+#endif
 	}
 
 	private var removalsSection: some View {

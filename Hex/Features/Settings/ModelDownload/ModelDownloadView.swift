@@ -1,9 +1,13 @@
 import ComposableArchitecture
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 
 public struct ModelDownloadView: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 
 	@Bindable var store: StoreOf<ModelDownloadFeature>
 	var shouldFlash: Bool = false
@@ -56,6 +60,8 @@ public struct ModelDownloadView: View {
 		.onAppear {
 			store.send(.fetchModels)
 		}
+#if DEBUG
 		.enableInjection()
+#endif
 	}
 }

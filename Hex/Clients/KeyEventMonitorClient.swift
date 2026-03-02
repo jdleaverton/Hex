@@ -102,7 +102,7 @@ class KeyEventMonitorClientLive {
   private var runLoopSource: CFRunLoopSource?
   private var continuations: [UUID: @Sendable (KeyEvent) -> Bool] = [:]
   private var inputContinuations: [UUID: @Sendable (InputEvent) -> Bool] = [:]
-  private let queue = DispatchQueue(label: "com.kitlangton.Hex.KeyEventMonitor", attributes: .concurrent)
+  private let queue = DispatchQueue(label: "\(HexLog.appIdentifier).KeyEventMonitor", attributes: .concurrent)
   private var isMonitoring = false
   private var wantsMonitoring = false
   private var accessibilityTrusted = false
@@ -112,7 +112,7 @@ class KeyEventMonitorClientLive {
   private var hasPromptedForAccessibilityTrust = false
   @Shared(.hotkeyPermissionState) private var hotkeyPermissionState: HotkeyPermissionState
 
-  private let trustCheckIntervalNanoseconds: UInt64 = 100_000_000 // 100ms
+  private let trustCheckIntervalNanoseconds: UInt64 = 2_000_000_000 // 2s
 
   init() {
     logger.info("Initializing HotKeyClient with CGEvent tap.")

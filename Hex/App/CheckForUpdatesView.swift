@@ -1,6 +1,8 @@
 import Combine
 import ComposableArchitecture
+#if DEBUG
 import Inject
+#endif
 import Sparkle
 import SwiftUI
 
@@ -31,11 +33,15 @@ final class CheckForUpdatesViewModel {
 
 struct CheckForUpdatesView: View {
 	@State var viewModel = CheckForUpdatesViewModel.shared
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 
 	var body: some View {
 		Button("Check for Updates…", action: viewModel.checkForUpdates)
 			.disabled(!viewModel.canCheckForUpdates)
+#if DEBUG
 			.enableInjection()
+#endif
 	}
 }

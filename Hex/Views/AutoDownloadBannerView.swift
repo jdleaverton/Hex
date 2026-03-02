@@ -1,8 +1,12 @@
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 
 struct AutoDownloadBannerView: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 	enum Style {
 		case info
 		case error
@@ -60,7 +64,9 @@ struct AutoDownloadBannerView: View {
 				.stroke(accentColor.opacity(style == .error ? 0.4 : 0.25), lineWidth: 1)
 		)
 		.shadow(color: .black.opacity(0.12), radius: 8, x: 0, y: 4)
+#if DEBUG
 		.enableInjection()
+#endif
 	}
 
 	private var iconName: String {

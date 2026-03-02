@@ -24,7 +24,7 @@ struct AppFeature {
 	struct State {
 		var transcription: TranscriptionFeature.State = .init()
 		var settings: SettingsFeature.State = .init()
-		var history: HistoryFeature.State = .init()
+		var history: HistoryFeature.State?
 		var activeTab: ActiveTab = .settings
 		@Shared(.hexSettings) var hexSettings: HexSettings
 		@Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
@@ -70,10 +70,6 @@ struct AppFeature {
       SettingsFeature()
     }
 
-    Scope(state: \.history, action: \.history) {
-      HistoryFeature()
-    }
-
     Reduce { state, action in
       switch action {
       case .binding:
@@ -111,6 +107,18 @@ struct AppFeature {
       case .transcription:
         return .none
 
+      // Re-check permissions after settings requests them
+      case .settings(.requestMicrophone),
+           .settings(.requestAccessibility),
+           .settings(.requestInputMonitoring):
+        return .run { send in
+          // Give the system dialog time to resolve, then poll for updates
+          for _ in 0..<10 {
+            try? await Task.sleep(for: .seconds(1))
+            await send(.checkPermissions)
+          }
+        }
+
       case .settings:
         return .none
 
@@ -121,6 +129,10 @@ struct AppFeature {
         return .none
 		case let .setActiveTab(tab):
 			state.activeTab = tab
+			// Lazily initialize history state on first visit
+			if tab == .history, state.history == nil {
+				state.history = HistoryFeature.State()
+			}
 			return .none
 
       // Permission handling
@@ -170,6 +182,9 @@ struct AppFeature {
       case .modelStatusEvaluated:
         return .none
       }
+    }
+    .ifLet(\.history, action: \.history) {
+      HistoryFeature()
     }
   }
   
@@ -239,18 +254,31 @@ struct AppFeature {
   }
 
   private func startPermissionMonitoring() -> Effect<Action> {
-    .run { send in
-      // Initial check on app launch
-      await send(.checkPermissions)
-
-      // Monitor app activation events
-      for await activation in permissions.observeAppActivation() {
-        if case .didBecomeActive = activation {
-          await send(.appActivated)
+    .merge(
+      // Poll permissions every 2 seconds until all are granted, then stop
+      .run { send in
+        while !Task.isCancelled {
+          await send(.checkPermissions)
+          // Read current shared permission state to see if all granted
+          @Shared(.hotkeyPermissionState) var hotkeyPermissionState: HotkeyPermissionState
+          let hotkeysGranted = hotkeyPermissionState.accessibility == .granted
+            && hotkeyPermissionState.inputMonitoring == .granted
+          if hotkeysGranted {
+            // All permissions granted — stop polling, rely on activation events
+            break
+          }
+          try? await Task.sleep(for: .seconds(2))
+        }
+      },
+      // Also re-check on app activation (covers returning from System Settings)
+      .run { send in
+        for await activation in permissions.observeAppActivation() {
+          if case .didBecomeActive = activation {
+            await send(.checkPermissions)
+          }
         }
       }
-
-    }
+    )
   }
 
 }
@@ -308,13 +336,17 @@ struct AppView: View {
         WordRemappingsView(store: store.scope(state: \.settings, action: \.settings))
           .navigationTitle("Transforms")
       case .history:
-        HistoryView(store: store.scope(state: \.history, action: \.history))
-          .navigationTitle("History")
+        if let historyStore = store.scope(state: \.history, action: \.history) {
+          HistoryView(store: historyStore)
+            .navigationTitle("History")
+        }
       case .about:
         AboutView(store: store.scope(state: \.settings, action: \.settings))
           .navigationTitle("About")
       }
     }
+#if DEBUG
     .enableInjection()
+#endif
   }
 }

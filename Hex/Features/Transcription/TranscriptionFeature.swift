@@ -9,7 +9,9 @@ import ComposableArchitecture
 import CoreGraphics
 import Foundation
 import HexCore
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 import WhisperKit
 
@@ -30,7 +32,6 @@ struct TranscriptionFeature {
     @Shared(.hexSettings) var hexSettings: HexSettings
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
     @Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
-    @Shared(.transcriptionHistory) var transcriptionHistory: TranscriptionHistory
   }
 
   enum Action {
@@ -77,14 +78,16 @@ struct TranscriptionFeature {
       // MARK: - Lifecycle / Setup
 
       case .task:
-        // Starts two concurrent effects:
+        // Starts concurrent effects:
         // 1) Observing audio meter
         // 2) Monitoring hot key events
         // 3) Priming the recorder for instant startup
+        // 4) Device guardian — pins selected mic as system default, re-pins on BT changes
         return .merge(
           startMeteringEffect(),
           startHotKeyMonitoringEffect(),
-          warmUpRecorderEffect()
+          warmUpRecorderEffect(),
+          startDeviceGuardianEffect()
         )
 
       // MARK: - Metering
@@ -258,6 +261,12 @@ private extension TranscriptionFeature {
   func warmUpRecorderEffect() -> Effect<Action> {
     .run { _ in
       await recording.warmUpRecorder()
+    }
+  }
+
+  func startDeviceGuardianEffect() -> Effect<Action> {
+    .run { _ in
+      await recording.startDeviceGuardian()
     }
   }
 }
@@ -439,9 +448,10 @@ private extension TranscriptionFeature {
 
     let sourceAppBundleID = state.sourceAppBundleID
     let sourceAppName = state.sourceAppName
-    let transcriptionHistory = state.$transcriptionHistory
 
     return .run { send in
+      // Load history on demand — avoids eager JSON decode at app startup
+      @Shared(.transcriptionHistory) var transcriptionHistory: TranscriptionHistory
       do {
         try await finalizeRecordingAndStoreTranscript(
           result: modifiedResult,
@@ -449,7 +459,7 @@ private extension TranscriptionFeature {
           sourceAppBundleID: sourceAppBundleID,
           sourceAppName: sourceAppName,
           audioURL: audioURL,
-          transcriptionHistory: transcriptionHistory
+          transcriptionHistory: $transcriptionHistory
         )
       } catch {
         await send(.transcriptionError(error, audioURL))
@@ -555,7 +565,9 @@ private extension TranscriptionFeature {
 
 struct TranscriptionView: View {
   @Bindable var store: StoreOf<TranscriptionFeature>
+#if DEBUG
   @ObserveInjection var inject
+#endif
 
   var status: TranscriptionIndicatorView.Status {
     if store.isTranscribing {
@@ -577,7 +589,9 @@ struct TranscriptionView: View {
     .task {
       await store.send(.task).finish()
     }
+#if DEBUG
     .enableInjection()
+#endif
   }
 }
 

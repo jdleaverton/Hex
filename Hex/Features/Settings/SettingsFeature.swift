@@ -36,7 +36,6 @@ struct SettingsFeature {
     @Shared(.isSettingHotKey) var isSettingHotKey: Bool = false
     @Shared(.isSettingPasteLastTranscriptHotkey) var isSettingPasteLastTranscriptHotkey: Bool = false
     @Shared(.isRemappingScratchpadFocused) var isRemappingScratchpadFocused: Bool = false
-    @Shared(.transcriptionHistory) var transcriptionHistory: TranscriptionHistory
     @Shared(.hotkeyPermissionState) var hotkeyPermissionState: HotkeyPermissionState
 
     var languages: IdentifiedArrayOf<Language> = []
@@ -135,22 +134,11 @@ struct SettingsFeature {
         return .run { send in
           await send(.modelDownload(.fetchModels))
           await send(.loadAvailableInputDevices)
-          
-          // Set up periodic refresh of available devices (every 120 seconds)
-          // Using a longer interval to reduce resource usage
-          let deviceRefreshTask = Task { @MainActor in
-            for await _ in clock.timer(interval: .seconds(120)) {
-              // Only refresh when the app is active to save resources
-              if NSApplication.shared.isActive {
-                send(.loadAvailableInputDevices)
-              }
-            }
-          }
-          
+
           // Listen for device connection/disconnection notifications
           // Using a simpler debounced approach with a single task
           var deviceUpdateTask: Task<Void, Never>?
-          
+
           // Helper function to debounce device updates
           func debounceDeviceUpdate() {
             deviceUpdateTask?.cancel()
@@ -161,7 +149,7 @@ struct SettingsFeature {
               }
             }
           }
-          
+
           let deviceConnectionObserver = NotificationCenter.default.addObserver(
             forName: NSNotification.Name(rawValue: "AVCaptureDeviceWasConnected"),
             object: nil,
@@ -169,7 +157,7 @@ struct SettingsFeature {
           ) { _ in
             debounceDeviceUpdate()
           }
-          
+
           let deviceDisconnectionObserver = NotificationCenter.default.addObserver(
             forName: NSNotification.Name(rawValue: "AVCaptureDeviceWasDisconnected"),
             object: nil,
@@ -177,7 +165,7 @@ struct SettingsFeature {
           ) { _ in
             debounceDeviceUpdate()
           }
-          
+
           // Be sure to clean up resources when the task is finished
           defer {
             deviceUpdateTask?.cancel()
@@ -188,8 +176,6 @@ struct SettingsFeature {
           for try await keyEvent in await keyEventMonitor.listenForKeyPress() {
             await send(.keyEvent(keyEvent))
           }
-          
-          deviceRefreshTask.cancel()
         }
 
       case .startSettingHotKey:
@@ -349,24 +335,23 @@ struct SettingsFeature {
         
       case let .toggleSaveTranscriptionHistory(enabled):
         state.$hexSettings.withLock { $0.saveTranscriptionHistory = enabled }
-        
+
         // If disabling history, delete all existing entries
         if !enabled {
-          let transcripts = state.transcriptionHistory.history
-          
-          // Clear the history
-          state.$transcriptionHistory.withLock { history in
-            history.history.removeAll()
-          }
-          
-          // Delete all audio files
           return .run { _ in
+            @Shared(.transcriptionHistory) var transcriptionHistory: TranscriptionHistory
+            let transcripts = transcriptionHistory.history
+
+            $transcriptionHistory.withLock { history in
+              history.history.removeAll()
+            }
+
             for transcript in transcripts {
               try? FileManager.default.removeItem(at: transcript.audioPath)
             }
           }
         }
-        
+
         return .none
 
       case let .setModifierSide(kind, side):

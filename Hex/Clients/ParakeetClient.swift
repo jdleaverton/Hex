@@ -149,6 +149,15 @@ actor ParakeetClient {
     return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "$1$2")
   }
 
+  /// Release the in-memory model objects without deleting cached files on disk.
+  /// The next transcription will re-load from the local cache.
+  func unload() {
+    asr = nil
+    models = nil
+    currentVariant = nil
+    logger.info("Parakeet model unloaded from memory")
+  }
+
   /// Run a short silent transcription to prime the ANE pipeline.
   /// Call after ensureLoaded() so the first real transcription is fast.
   func warmup() async {
@@ -240,6 +249,7 @@ actor ParakeetClient {
   }
   func transcribe(_ url: URL) async throws -> String { throw NSError(domain: "Parakeet", code: -3, userInfo: [NSLocalizedDescriptionKey: "Parakeet not available"]) }
   func transcribe(samples: [Float]) async throws -> String { throw NSError(domain: "Parakeet", code: -3, userInfo: [NSLocalizedDescriptionKey: "Parakeet not available"]) }
+  func unload() {}
   func warmup() async {}
   func deleteCaches(modelName: String) async throws {}
 }

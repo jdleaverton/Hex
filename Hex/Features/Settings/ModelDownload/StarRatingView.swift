@@ -1,8 +1,12 @@
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 
 struct StarRatingView: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 	let filled: Int
 	let max: Int
 
@@ -19,7 +23,9 @@ struct StarRatingView: View {
 					.foregroundColor(i < filled ? .blue : .gray.opacity(0.5))
 			}
 		}
+#if DEBUG
 		.enableInjection()
+#endif
 	}
 }
 

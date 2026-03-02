@@ -32,6 +32,9 @@ struct RecordingClient {
   var getAvailableInputDevices: @Sendable () async -> [AudioInputDevice] = { [] }
   var getDefaultInputDeviceName: @Sendable () async -> String? = { nil }
   var warmUpRecorder: @Sendable () async -> Void = {}
+  /// Background guardian that keeps the user's selected mic pinned as the
+  /// system default input and re-primes the recorder when devices change.
+  var startDeviceGuardian: @Sendable () async -> Void = {}
   var cleanup: @Sendable () async -> Void = {}
 }
 
@@ -46,6 +49,7 @@ extension RecordingClient: DependencyKey {
       getAvailableInputDevices: { await live.getAvailableInputDevices() },
       getDefaultInputDeviceName: { await live.getDefaultInputDeviceName() },
       warmUpRecorder: { await live.warmUpRecorder() },
+      startDeviceGuardian: { await live.startDeviceGuardian() },
       cleanup: { await live.cleanup() }
     )
   }
@@ -310,6 +314,11 @@ actor RecordingClientLive {
   private let recordingURL = FileManager.default.temporaryDirectory.appendingPathComponent("recording.wav")
   private var isRecorderPrimedForNextSession = false
   private var lastPrimedDeviceID: AudioDeviceID?
+  private var lastPrimedTime: Date?
+  /// Primed state goes stale after this interval — CoreAudio's HAL connection
+  /// to the mic can idle out, causing .record() to block 150-250ms re-waking hardware.
+  /// 15s is conservative; logs show staleness onset as early as ~10s on some hardware.
+  private static let primeStaleInterval: TimeInterval = 15
   private var recordingSessionID: UUID?
   private var mediaControlTask: Task<Void, Never>?
   private let recorderSettings: [String: Any] = [
@@ -339,7 +348,7 @@ actor RecordingClientLive {
   private var previousVolume: Float?
 
   // Cache to store already-processed device information
-  private var deviceCache: [AudioDeviceID: (hasInput: Bool, name: String?)] = [:]
+  private var deviceCache: [AudioDeviceID: (hasInput: Bool, name: String?, uid: String?)] = [:]
   private var lastDeviceCheck = Date(timeIntervalSince1970: 0)
   
   /// Gets all available input devices on the system
@@ -359,19 +368,22 @@ actor RecordingClientLive {
     for device in devices {
       let hasInput: Bool
       let name: String?
-      
+      let uid: String?
+
       // Check cache first to avoid expensive Core Audio calls
       if let cached = deviceCache[device] {
         hasInput = cached.hasInput
         name = cached.name
+        uid = cached.uid
       } else {
         hasInput = deviceHasInput(deviceID: device)
         name = hasInput ? getDeviceName(deviceID: device) : nil
-        deviceCache[device] = (hasInput, name)
+        uid = hasInput ? getDeviceUID(deviceID: device) : nil
+        deviceCache[device] = (hasInput, name, uid)
       }
-      
-      if hasInput, let deviceName = name {
-        inputDevices.append(AudioInputDevice(id: String(device), name: deviceName))
+
+      if hasInput, let deviceName = name, let deviceUID = uid {
+        inputDevices.append(AudioInputDevice(id: deviceUID, name: deviceName))
       }
     }
     
@@ -385,8 +397,9 @@ actor RecordingClientLive {
       return name
     }
     let name = getDeviceName(deviceID: deviceID)
+    let uid = getDeviceUID(deviceID: deviceID)
     if let name {
-      deviceCache[deviceID] = (hasInput: true, name: name)
+      deviceCache[deviceID] = (hasInput: true, name: name, uid: uid)
     }
     return name
   }
@@ -477,6 +490,35 @@ actor RecordingClientLive {
     return deviceName as String?
   }
   
+  /// Get the persistent UID for a device (survives reboots, unlike AudioDeviceID)
+  private func getDeviceUID(deviceID: AudioDeviceID) -> String? {
+    var address = audioPropertyAddress(kAudioDevicePropertyDeviceUID)
+    var uid: CFString? = nil
+    var size = UInt32(MemoryLayout<CFString?>.size)
+    let uidPtr: UnsafeMutableRawPointer = .allocate(byteCount: Int(size), alignment: MemoryLayout<CFString?>.alignment)
+    defer { uidPtr.deallocate() }
+
+    let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, uidPtr)
+    if status == 0 {
+      uid = uidPtr.load(as: CFString?.self)
+    }
+    return uid as String?
+  }
+
+  /// Resolve a persistent device UID back to the current AudioDeviceID
+  private func resolveDeviceID(fromUID uid: String) -> AudioDeviceID? {
+    let devices = getAllAudioDevices()
+    for device in devices {
+      if let cached = deviceCache[device], cached.uid == uid {
+        return device
+      }
+      if let deviceUID = getDeviceUID(deviceID: device), deviceUID == uid {
+        return device
+      }
+    }
+    return nil
+  }
+
   /// Check if device has input capabilities
   private func deviceHasInput(deviceID: AudioDeviceID) -> Bool {
     var address = audioPropertyAddress(kAudioDevicePropertyStreamConfiguration, scope: kAudioDevicePropertyScopeInput)
@@ -601,8 +643,8 @@ actor RecordingClientLive {
     // Check the selected device if specified, otherwise the default
     var deviceIDsToCheck: [AudioDeviceID] = []
 
-    if let selectedIDString = hexSettings.selectedMicrophoneID,
-       let selectedID = AudioDeviceID(selectedIDString) {
+    if let selectedUID = hexSettings.selectedMicrophoneID,
+       let selectedID = resolveDeviceID(fromUID: selectedUID) {
       deviceIDsToCheck.append(selectedID)
     }
 
@@ -711,15 +753,40 @@ actor RecordingClientLive {
   }
 
   func startRecording() async {
-    // Check and fix device-level mute before recording
-    ensureInputDeviceUnmuted()
-
+    let t0 = CFAbsoluteTimeGetCurrent()
     let sessionID = UUID()
     recordingSessionID = sessionID
     mediaControlTask?.cancel()
     mediaControlTask = nil
 
-    // Handle audio behavior based on user preference
+    // ALWAYS-FAST PATH: Trust the device guardian to keep the system default
+    // pinned correctly. Never do CoreAudio device resolution here.
+    do {
+      let recorder = try ensureRecorderReadyForRecording()
+      let t1 = CFAbsoluteTimeGetCurrent()
+      guard recorder.record() else {
+        recordingLogger.error("AVAudioRecorder refused to start recording")
+        endRecordingSession()
+        return
+      }
+      let t2 = CFAbsoluteTimeGetCurrent()
+      startMeterTask()
+      let prepareMs = Int((t1 - t0) * 1000)
+      let recordMs = Int((t2 - t1) * 1000)
+      let totalMs = Int((t2 - t0) * 1000)
+      recordingLogger.notice("Recording started — prepare: \(prepareMs)ms, record(): \(recordMs)ms, total: \(totalMs)ms")
+    } catch {
+      recordingLogger.error("Failed to start recording: \(error.localizedDescription)")
+      endRecordingSession()
+      return
+    }
+
+    // Safety checks and media control run in background AFTER recording has started
+    Task { self.ensureInputDeviceUnmuted() }
+    startMediaControlTask(sessionID: sessionID)
+  }
+
+  private func startMediaControlTask(sessionID: UUID) {
     switch hexSettings.recordingAudioBehavior {
     case .pauseMedia:
       // Pause media in background - don't block recording from starting
@@ -760,57 +827,6 @@ actor RecordingClientLive {
     case .doNothing:
       // No audio handling
       break
-    }
-
-    // Determine target input device (custom selection or system default)
-    let targetDeviceID: AudioDeviceID? = {
-      if let selectedDeviceIDString = hexSettings.selectedMicrophoneID,
-         let selectedDeviceID = AudioDeviceID(selectedDeviceIDString) {
-        // Verify the selected device is still available
-        let devices = getAllAudioDevices()
-        if devices.contains(selectedDeviceID) && deviceHasInput(deviceID: selectedDeviceID) {
-          return selectedDeviceID
-        } else {
-          recordingLogger.notice("Selected device \(selectedDeviceID) missing; using system default")
-          return nil
-        }
-      }
-      return nil  // Use system default
-    }()
-
-    // Get current default input device
-    let currentDefaultDevice = getDefaultInputDevice()
-    if let primedDevice = lastPrimedDeviceID, primedDevice != currentDefaultDevice {
-      recordingLogger.notice("Default input changed from \(primedDevice) to \(currentDefaultDevice ?? 0); invalidating primed state")
-      invalidatePrimedState()
-    }
-
-    // Only change device if target differs from current default
-    if let target = targetDeviceID {
-      if target != currentDefaultDevice {
-        recordingLogger.notice("Switching input device from \(currentDefaultDevice ?? 0) to \(target)")
-        setInputDevice(deviceID: target)
-        // Invalidate primed state since device changed - recorder was prepared for old device
-        invalidatePrimedState()
-      } else {
-        recordingLogger.debug("Device \(target) already set as default, skipping setInputDevice()")
-      }
-    } else {
-      recordingLogger.debug("Using system default microphone")
-    }
-
-    do {
-      let recorder = try ensureRecorderReadyForRecording()
-      guard recorder.record() else {
-        recordingLogger.error("AVAudioRecorder refused to start recording")
-        endRecordingSession()
-        return
-      }
-      startMeterTask()
-      recordingLogger.notice("Recording started")
-    } catch {
-      recordingLogger.error("Failed to start recording: \(error.localizedDescription)")
-      endRecordingSession()
     }
   }
 
@@ -901,6 +917,7 @@ actor RecordingClientLive {
   private func invalidatePrimedState() {
     isRecorderPrimedForNextSession = false
     lastPrimedDeviceID = nil
+    lastPrimedTime = nil
   }
 
   private func updatePausedPlayers(_ players: [String], sessionID: UUID) {
@@ -959,16 +976,28 @@ actor RecordingClientLive {
   private func ensureRecorderReadyForRecording() throws -> AVAudioRecorder {
     let recorder = try recorderOrCreate()
 
-    if !isRecorderPrimedForNextSession {
-      recordingLogger.notice("Recorder NOT primed, calling prepareToRecord() now")
+    // Check if prime is stale — CoreAudio's HAL connection idles out after ~30s,
+    // causing .record() to block 150-250ms while hardware re-wakes.
+    let primeIsStale: Bool = {
+      guard let primedAt = lastPrimedTime else { return true }
+      return Date().timeIntervalSince(primedAt) > Self.primeStaleInterval
+    }()
+
+    if !isRecorderPrimedForNextSession || primeIsStale {
+      if primeIsStale && isRecorderPrimedForNextSession {
+        recordingLogger.notice("Primed state is stale (\(Int(Date().timeIntervalSince(self.lastPrimedTime ?? .distantPast)))s old), re-preparing")
+      } else {
+        recordingLogger.notice("Recorder NOT primed, calling prepareToRecord() now")
+      }
       guard recorder.prepareToRecord() else {
         throw RecorderPreparationError.failedToPrepareRecorder
       }
     } else {
-      recordingLogger.notice("Recorder already primed, skipping prepareToRecord()")
+      recordingLogger.notice("Recorder already primed (\(Int(Date().timeIntervalSince(self.lastPrimedTime ?? .distantPast)))s old), skipping prepareToRecord()")
     }
 
     isRecorderPrimedForNextSession = false
+    lastPrimedTime = nil
     return recorder
   }
 
@@ -1007,12 +1036,14 @@ actor RecordingClientLive {
     guard recorder.prepareToRecord() else {
       isRecorderPrimedForNextSession = false
       lastPrimedDeviceID = nil
+      lastPrimedTime = nil
       throw RecorderPreparationError.failedToPrepareRecorder
     }
 
     isRecorderPrimedForNextSession = true
     lastPrimedDeviceID = getDefaultInputDevice()
-    recordingLogger.debug("Recorder primed for device \(self.lastPrimedDeviceID ?? 0)")
+    lastPrimedTime = Date()
+    recordingLogger.notice("Recorder primed for device \(self.lastPrimedDeviceID ?? 0)")
   }
 
   func startMeterTask() {
@@ -1044,6 +1075,219 @@ actor RecordingClientLive {
     } catch {
       recordingLogger.error("Failed to warm up recorder: \(error.localizedDescription)")
     }
+  }
+
+  // MARK: - Device Guardian
+
+  /// A UID→AudioDeviceID reverse lookup cache so we don't enumerate all
+  /// devices (which blocks on Bluetooth) every time we need a device ID.
+  private var uidToDeviceID: [String: AudioDeviceID] = [:]
+
+  /// Fast UID→DeviceID resolution that checks the cache first and only
+  /// falls back to full enumeration on a miss.
+  private func cachedResolveDeviceID(fromUID uid: String) -> AudioDeviceID? {
+    // Check cache first
+    if let cached = uidToDeviceID[uid] {
+      // Verify it's still valid by checking the UID still matches
+      if let currentUID = getDeviceUID(deviceID: cached), currentUID == uid {
+        return cached
+      }
+      // Stale — remove
+      uidToDeviceID.removeValue(forKey: uid)
+    }
+    // Cache miss — do the full enumeration (slow, but only happens on changes)
+    if let deviceID = resolveDeviceID(fromUID: uid) {
+      uidToDeviceID[uid] = deviceID
+      return deviceID
+    }
+    return nil
+  }
+
+  /// Pins the user's selected microphone as the system default input device.
+  /// If no mic is selected, or the selected mic is already the default, this is a no-op.
+  /// Re-primes the recorder after any device change so recording is instant.
+  ///
+  /// The `selectedMicrophoneID` setting stores the device UID (a persistent string
+  /// like "BuiltInMicrophoneDevice"). However, legacy settings may contain a numeric
+  /// AudioDeviceID as a string (e.g. "96"). We handle both.
+  private func pinSelectedDeviceAsDefault() {
+    guard let selectedID = hexSettings.selectedMicrophoneID else {
+      recordingLogger.debug("No selected microphone — using system default")
+      return
+    }
+
+    // Resolve the selected ID to an AudioDeviceID.
+    // Try as UID first (the expected format), then fall back to numeric device ID (legacy).
+    let targetDeviceID: AudioDeviceID
+    if let resolved = cachedResolveDeviceID(fromUID: selectedID) {
+      targetDeviceID = resolved
+    } else if let numericID = UInt32(selectedID) {
+      // Legacy format: raw AudioDeviceID stored as string.
+      // Verify it actually exists and has input.
+      if deviceHasInput(deviceID: numericID) {
+        targetDeviceID = numericID
+        recordingLogger.debug("Resolved selected mic as legacy numeric device ID \(numericID)")
+      } else {
+        recordingLogger.warning("Selected mic ID \(selectedID, privacy: .private) not found as UID or valid device ID — using system default")
+        return
+      }
+    } else {
+      recordingLogger.warning("Selected mic ID \(selectedID, privacy: .private) not found on system — cannot pin")
+      return
+    }
+
+    let currentDefault = getDefaultInputDevice()
+    if currentDefault == targetDeviceID {
+      recordingLogger.debug("Selected mic already pinned as system default")
+      return
+    }
+
+    recordingLogger.notice("Pinning selected mic (ID: \(selectedID, privacy: .private), deviceID: \(targetDeviceID)) as system default (was \(currentDefault ?? 0))")
+    setInputDevice(deviceID: targetDeviceID)
+
+    // Re-prime the recorder so it picks up the new device
+    invalidatePrimedState()
+    do {
+      try primeRecorderForNextSession()
+      recordingLogger.debug("Recorder re-primed after device pin")
+    } catch {
+      recordingLogger.error("Failed to re-prime recorder after device pin: \(error.localizedDescription)")
+    }
+  }
+
+  /// Background guardian that:
+  /// 1. Pins the selected mic as system default on startup
+  /// 2. Watches for device connect/disconnect and re-pins when disrupted
+  /// 3. Watches for default-device changes (e.g. macOS switching to AirPods)
+  ///    and re-pins if the user has a preference
+  ///
+  /// Runs indefinitely — callers should let the Task naturally cancel.
+  func startDeviceGuardian() async {
+    // Initial pin
+    pinSelectedDeviceAsDefault()
+
+    // Invalidate the UID cache whenever devices change
+    let deviceNotifications: [(Notification.Name, String)] = [
+      (Notification.Name("AVCaptureDeviceWasConnected"), "connected"),
+      (Notification.Name("AVCaptureDeviceWasDisconnected"), "disconnected"),
+    ]
+
+    // Use CoreAudio property listener for default-input-device changes
+    var defaultDeviceAddress = audioPropertyAddress(kAudioHardwarePropertyDefaultInputDevice)
+    let deviceChangedStream = AsyncStream<Void> { continuation in
+      let status = AudioObjectAddPropertyListenerBlock(
+        AudioObjectID(kAudioObjectSystemObject),
+        &defaultDeviceAddress,
+        DispatchQueue.main
+      ) { _, _ in
+        continuation.yield(())
+      }
+      if status != noErr {
+        recordingLogger.error("Failed to install default-input listener: \(status)")
+      }
+      continuation.onTermination = { _ in
+        var addr = AudioObjectPropertyAddress(
+          mSelector: kAudioHardwarePropertyDefaultInputDevice,
+          mScope: kAudioObjectPropertyScopeGlobal,
+          mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+          AudioObjectID(kAudioObjectSystemObject),
+          &addr,
+          DispatchQueue.main
+        ) { _, _ in }
+      }
+    }
+
+    // Also listen for AVCapture connect/disconnect via NotificationCenter
+    let connectStream = AsyncStream<String> { continuation in
+      var observers: [NSObjectProtocol] = []
+      for (name, label) in deviceNotifications {
+        let observer = NotificationCenter.default.addObserver(
+          forName: name, object: nil, queue: .main
+        ) { _ in
+          continuation.yield(label)
+        }
+        observers.append(observer)
+      }
+      continuation.onTermination = { _ in
+        for observer in observers {
+          NotificationCenter.default.removeObserver(observer)
+        }
+      }
+    }
+
+    // Run both listeners concurrently
+    await withTaskGroup(of: Void.self) { group in
+      // Default-device change listener
+      group.addTask {
+        for await _ in deviceChangedStream {
+          guard !Task.isCancelled else { return }
+          // Debounce — macOS often fires multiple rapid events during BT transitions
+          try? await Task.sleep(for: .milliseconds(500))
+          guard !Task.isCancelled else { return }
+          recordingLogger.notice("Default input device changed — re-pinning selected mic")
+          await self.handleDeviceChange()
+        }
+      }
+
+      // Connect/disconnect listener
+      group.addTask {
+        for await event in connectStream {
+          guard !Task.isCancelled else { return }
+          // Debounce
+          try? await Task.sleep(for: .milliseconds(500))
+          guard !Task.isCancelled else { return }
+          recordingLogger.notice("Audio device \(event) — refreshing device cache and re-pinning")
+          await self.handleDeviceChange()
+        }
+      }
+
+      // Periodically re-prime the recorder so the HAL connection never goes stale.
+      // Without this, .record() blocks 150-250ms re-waking the audio hardware.
+      group.addTask {
+        while !Task.isCancelled {
+          try? await Task.sleep(for: .seconds(12))
+          guard !Task.isCancelled else { return }
+          await self.refreshPrimeIfIdle()
+        }
+      }
+    }
+  }
+
+  /// Re-primes the recorder only when not actively recording,
+  /// keeping the HAL connection fresh between sessions.
+  private func refreshPrimeIfIdle() {
+    guard recorder?.isRecording != true else { return }
+    refreshPrime()
+  }
+
+  /// Silently re-primes the recorder to keep the HAL connection fresh.
+  private func refreshPrime() {
+    guard recorder != nil else { return }
+    // Skip if recently primed
+    if let t = lastPrimedTime, Date().timeIntervalSince(t) < Self.primeStaleInterval * 0.7 {
+      return
+    }
+    do {
+      let t0 = CFAbsoluteTimeGetCurrent()
+      try primeRecorderForNextSession()
+      let ms = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
+      recordingLogger.notice("Recorder re-primed (keep-alive) in \(ms)ms")
+    } catch {
+      recordingLogger.error("Keep-alive re-prime failed: \(error.localizedDescription)")
+    }
+  }
+
+  /// Called when any device event occurs. Clears stale caches and re-pins.
+  private func handleDeviceChange() {
+    // Invalidate caches so next resolution gets fresh data
+    uidToDeviceID.removeAll()
+    deviceCache.removeAll()
+    lastDeviceCheck = Date()
+
+    // Re-pin the selected mic
+    pinSelectedDeviceAsDefault()
   }
 
   /// Release recorder resources. Call on app termination.

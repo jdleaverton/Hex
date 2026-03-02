@@ -3,7 +3,9 @@ import AppKit
 import ComposableArchitecture
 import Dependencies
 import HexCore
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 
 private let historyLogger = HexLog.history
@@ -339,7 +341,9 @@ struct TranscriptView: View {
 }
 
 struct HistoryView: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 	let store: StoreOf<HistoryFeature>
 	@State private var showingDeleteConfirmation = false
 	@Shared(.hexSettings) var hexSettings: HexSettings
@@ -391,6 +395,9 @@ struct HistoryView: View {
             Text("Are you sure you want to delete all transcripts? This action cannot be undone.")
           }
         }
-      }.enableInjection()
+      }
+#if DEBUG
+      .enableInjection()
+#endif
 	}
 }

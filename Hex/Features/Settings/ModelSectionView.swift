@@ -1,9 +1,13 @@
 import ComposableArchitecture
+#if DEBUG
 import Inject
+#endif
 import SwiftUI
 
 struct ModelSectionView: View {
+#if DEBUG
 	@ObserveInjection var inject
+#endif
 	@Bindable var store: StoreOf<SettingsFeature>
 	let shouldFlash: Bool
 
@@ -14,6 +18,8 @@ struct ModelSectionView: View {
 				shouldFlash: shouldFlash
 			)
 		}
-		.enableInjection()
+#if DEBUG
+	.enableInjection()
+#endif
 	}
 }

@@ -38,6 +38,10 @@ struct TranscriptionClient {
 
   /// Lists all model variants found in `argmaxinc/whisperkit-coreml`.
   var getAvailableModels: @Sendable () async throws -> [String]
+
+  /// Pre-warms the model into memory so transcription starts instantly.
+  /// Safe to call while recording — idempotent if already loaded.
+  var ensureModelLoaded: @Sendable (String) async throws -> Void = { _ in }
 }
 
 extension TranscriptionClient: DependencyKey {
@@ -49,7 +53,8 @@ extension TranscriptionClient: DependencyKey {
       deleteModel: { try await live.deleteModel(variant: $0) },
       isModelDownloaded: { await live.isModelDownloaded($0) },
       getRecommendedModels: { await live.getRecommendedModels() },
-      getAvailableModels: { try await live.getAvailableModels() }
+      getAvailableModels: { try await live.getAvailableModels() },
+      ensureModelLoaded: { try await live.downloadAndLoadModel(variant: $0) { _ in } }
     )
   }
 }
@@ -76,7 +81,7 @@ actor TranscriptionClientLive {
 
   /// Timer that fires after idle period to unload the model from memory
   private var idleUnloadTask: Task<Void, Never>?
-  private static let idleUnloadDelay: Duration = .seconds(60)
+  private static let idleUnloadDelay: Duration = .seconds(300)
 
   /// The base folder under which we store model data (e.g., ~/Library/Application Support/...).
   private lazy var modelsBaseFolder: URL = {
@@ -257,18 +262,24 @@ actor TranscriptionClientLive {
       try await downloadAndLoadModel(variant: model) { p in
         progressCallback(p)
       }
-      transcriptionLogger.info("Parakeet ensureLoaded took \(String(format: "%.2f", Date().timeIntervalSince(startLoad)))s")
+      let ensureLoadedMs = Int(Date().timeIntervalSince(startLoad) * 1000)
+      transcriptionLogger.notice("Parakeet ensureLoaded: \(ensureLoadedMs)ms")
 
       // Read audio into memory and prepend silence so the model doesn't clip
       // the first word. Then pass raw samples directly to Parakeet — this
       // skips redundant file I/O and lets FluidAudio's ChunkProcessor handle
       // long audio internally (~15s chunks, 2s overlap, 3-tier merge).
-      let startTx = Date()
+      let startPrep = Date()
       let samples = try AudioPreparer.readAndPrependSilence(url: url)
-      transcriptionLogger.debug("Audio prepared: \(samples.count) samples (\(String(format: "%.1f", Double(samples.count) / 16000.0))s)")
+      let prepMs = Int(Date().timeIntervalSince(startPrep) * 1000)
+      let audioDuration = String(format: "%.1f", Double(samples.count) / 16000.0)
+      transcriptionLogger.notice("Audio prepared: \(samples.count) samples (~\(audioDuration)s) in \(prepMs)ms")
+
+      let startInference = Date()
       let text = try await parakeet.transcribe(samples: samples)
-      transcriptionLogger.info("Parakeet transcription took \(String(format: "%.2f", Date().timeIntervalSince(startTx)))s")
-      transcriptionLogger.info("Parakeet request total elapsed \(String(format: "%.2f", Date().timeIntervalSince(startAll)))s")
+      let inferenceMs = Int(Date().timeIntervalSince(startInference) * 1000)
+      let totalMs = Int(Date().timeIntervalSince(startAll) * 1000)
+      transcriptionLogger.notice("Parakeet pipeline — ensureLoaded: \(ensureLoadedMs)ms, audioPrepare: \(prepMs)ms, inference: \(inferenceMs)ms, total: \(totalMs)ms")
       scheduleIdleUnload()
       return text
     }

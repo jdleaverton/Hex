@@ -302,12 +302,17 @@ private extension TranscriptionFeature {
     transcriptionFeatureLogger.notice("Recording started at \(startTime.ISO8601Format())")
 
     // Prevent system sleep during recording
+    let selectedModel = state.hexSettings.selectedModel
     return .run { [sleepManagement, preventSleep = state.hexSettings.preventSystemSleep] send in
       // Start recording FIRST to capture audio immediately
       await recording.startRecording()
 
       // Play sound after recording has started (won't block capture)
       soundEffect.play(.startRecording)
+
+      // Pre-warm the transcription model while the user is still talking.
+      // This overlaps the 500ms cold-load with recording time so it's free.
+      try? await transcription.ensureModelLoaded(selectedModel)
 
       if preventSleep {
         await sleepManagement.preventSleep(reason: "Hex Voice Recording")
@@ -493,6 +498,7 @@ private extension TranscriptionFeature {
     audioURL: URL,
     transcriptionHistory: Shared<TranscriptionHistory>
   ) async throws {
+    let t0 = CFAbsoluteTimeGetCurrent()
     @Shared(.hexSettings) var hexSettings: HexSettings
 
     if hexSettings.saveTranscriptionHistory {
@@ -520,9 +526,14 @@ private extension TranscriptionFeature {
     } else {
       try? FileManager.default.removeItem(at: audioURL)
     }
+    let historyMs = Int((CFAbsoluteTimeGetCurrent() - t0) * 1000)
 
+    let t1 = CFAbsoluteTimeGetCurrent()
     await pasteboard.paste(result)
+    let pasteMs = Int((CFAbsoluteTimeGetCurrent() - t1) * 1000)
+
     soundEffect.play(.pasteTranscript)
+    transcriptionFeatureLogger.notice("Finalize — historySave: \(historyMs)ms, paste: \(pasteMs)ms, total: \(historyMs + pasteMs)ms")
   }
 }
 

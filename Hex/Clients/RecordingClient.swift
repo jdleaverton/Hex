@@ -6,6 +6,7 @@
 //
 
 import AppKit // For NSEvent media key simulation
+import AudioToolbox
 import AVFoundation
 import ComposableArchitecture
 import CoreAudio
@@ -332,6 +333,13 @@ actor RecordingClientLive {
   ]
   private let (meterStream, meterContinuation) = AsyncStream<Meter>.makeStream()
   private var meterTask: Task<Void, Never>?
+
+  // MARK: - Hardware Keep-Alive Engine
+  // A background AVAudioEngine with a minimal input tap keeps the microphone
+  // hardware active at all times. Without this, AVAudioRecorder.record() takes
+  // 200-400ms to re-wake the audio HAL after idle, causing speech to be clipped.
+  // With this, record() consistently takes 40-50ms.
+  private var hardwareKeepAliveEngine: AVAudioEngine?
 
   @Shared(.hexSettings) var hexSettings: HexSettings
 
@@ -1075,6 +1083,64 @@ actor RecordingClientLive {
     } catch {
       recordingLogger.error("Failed to warm up recorder: \(error.localizedDescription)")
     }
+    startHardwareKeepAlive()
+  }
+
+  // MARK: - Hardware Keep-Alive
+
+  /// Starts a background AVAudioEngine with a no-op input tap to keep the
+  /// microphone hardware active. This prevents the 200-400ms wake penalty
+  /// on AVAudioRecorder.record() after idle.
+  private func startHardwareKeepAlive() {
+    guard hardwareKeepAliveEngine == nil else { return }
+
+    let engine = AVAudioEngine()
+    let inputNode = engine.inputNode
+
+    // Route the engine to the same input device the recorder is primed for,
+    // otherwise AVAudioEngine may pick an output-only device.
+    if let deviceID = lastPrimedDeviceID ?? getDefaultInputDevice() {
+      var dev = deviceID
+      let status = AudioUnitSetProperty(
+        inputNode.audioUnit!,
+        kAudioOutputUnitProperty_CurrentDevice,
+        kAudioUnitScope_Global,
+        0,
+        &dev,
+        UInt32(MemoryLayout<AudioDeviceID>.size)
+      )
+      if status != noErr {
+        recordingLogger.warning("Could not route keep-alive to device \(deviceID) (status \(status)), using default")
+      }
+    }
+
+    let format = inputNode.outputFormat(forBus: 0)
+
+    // Validate we have a real input device
+    guard format.channelCount > 0, format.sampleRate > 0 else {
+      recordingLogger.warning("Cannot start hardware keep-alive: no valid input format (\(format.sampleRate)Hz, \(format.channelCount)ch)")
+      return
+    }
+
+    inputNode.installTap(onBus: 0, bufferSize: 1024, format: format) { _, _ in }
+
+    do {
+      try engine.start()
+      hardwareKeepAliveEngine = engine
+      recordingLogger.notice("Hardware keep-alive engine started on device \(self.lastPrimedDeviceID ?? 0) (\(format.sampleRate)Hz, \(format.channelCount)ch)")
+    } catch {
+      recordingLogger.error("Failed to start hardware keep-alive engine: \(error.localizedDescription)")
+      inputNode.removeTap(onBus: 0)
+    }
+  }
+
+  /// Stops the background hardware keep-alive engine.
+  private func stopHardwareKeepAlive() {
+    guard let engine = hardwareKeepAliveEngine else { return }
+    engine.inputNode.removeTap(onBus: 0)
+    engine.stop()
+    hardwareKeepAliveEngine = nil
+    recordingLogger.notice("Hardware keep-alive engine stopped")
   }
 
   // MARK: - Device Guardian
@@ -1243,15 +1309,8 @@ actor RecordingClientLive {
         }
       }
 
-      // Periodically re-prime the recorder so the HAL connection never goes stale.
-      // Without this, .record() blocks 150-250ms re-waking the audio hardware.
-      group.addTask {
-        while !Task.isCancelled {
-          try? await Task.sleep(for: .seconds(12))
-          guard !Task.isCancelled else { return }
-          await self.refreshPrimeIfIdle()
-        }
-      }
+      // NOTE: The 12s re-prime loop was removed — the AVAudioEngine hardware
+      // keep-alive now prevents the HAL wake penalty that this was working around.
     }
   }
 
@@ -1280,11 +1339,19 @@ actor RecordingClientLive {
   }
 
   /// Called when any device event occurs. Clears stale caches and re-pins.
+  /// Skips device pinning while recording to avoid disrupting active capture.
   private func handleDeviceChange() {
     // Invalidate caches so next resolution gets fresh data
     uidToDeviceID.removeAll()
     deviceCache.removeAll()
     lastDeviceCheck = Date()
+
+    // NEVER switch devices while recording — this causes audio disruption
+    // (e.g. AirPods reconnecting, cutting off speech)
+    guard recorder?.isRecording != true else {
+      recordingLogger.notice("Device change detected during recording — deferring pin until idle")
+      return
+    }
 
     // Re-pin the selected mic
     pinSelectedDeviceAsDefault()
@@ -1293,6 +1360,7 @@ actor RecordingClientLive {
   /// Release recorder resources. Call on app termination.
   func cleanup() {
     endRecordingSession()
+    stopHardwareKeepAlive()
     if let recorder = recorder {
       if recorder.isRecording {
         recorder.stop()

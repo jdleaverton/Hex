@@ -510,14 +510,18 @@ private extension TranscriptionFeature {
         sourceAppName
       )
 
-      transcriptionHistory.withLock { history in
-        history.history.insert(transcript, at: 0)
+      // Mutate on the main actor so SwiftUI's ForEach observation
+      // doesn't race with a concurrent view-graph traversal.
+      await MainActor.run {
+        transcriptionHistory.withLock { history in
+          history.history.insert(transcript, at: 0)
 
-        if let maxEntries = hexSettings.maxHistoryEntries, maxEntries > 0 {
-          while history.history.count > maxEntries {
-            if let removedTranscript = history.history.popLast() {
-              Task {
-                 try? await transcriptPersistence.deleteAudio(removedTranscript)
+          if let maxEntries = hexSettings.maxHistoryEntries, maxEntries > 0 {
+            while history.history.count > maxEntries {
+              if let removedTranscript = history.history.popLast() {
+                Task {
+                  try? await transcriptPersistence.deleteAudio(removedTranscript)
+                }
               }
             }
           }

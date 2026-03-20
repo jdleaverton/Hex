@@ -19,5 +19,11 @@ node_modules/
 .npm-cache/
 .tmp/
 
+# Build artifacts
+*.app
+*.log
+*.profraw
+test_logger
+
 # Claude
 .claude/

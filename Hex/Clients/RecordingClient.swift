@@ -868,6 +868,13 @@ actor RecordingClientLive {
       }
     }
 
+    // Ensure the keep-alive engine is running with current device routing.
+    // It may have been torn down by handleDeviceChange() during recording.
+    if hardwareKeepAliveEngine == nil {
+      recordingLogger.notice("Keep-alive engine was stopped (device change during recording) — restarting")
+      startHardwareKeepAlive()
+    }
+
     // Resume audio in background - don't block stop from completing
     let playersToResume = pausedPlayers
     let shouldResumeMedia = didPauseMedia
@@ -1099,10 +1106,12 @@ actor RecordingClientLive {
 
     // Route the engine to the same input device the recorder is primed for,
     // otherwise AVAudioEngine may pick an output-only device.
-    if let deviceID = lastPrimedDeviceID ?? getDefaultInputDevice() {
+    if let deviceID = lastPrimedDeviceID ?? getDefaultInputDevice(),
+       let audioUnit = inputNode.audioUnit
+    {
       var dev = deviceID
       let status = AudioUnitSetProperty(
-        inputNode.audioUnit!,
+        audioUnit,
         kAudioOutputUnitProperty_CurrentDevice,
         kAudioUnitScope_Global,
         0,
@@ -1137,11 +1146,22 @@ actor RecordingClientLive {
   /// Stops the background hardware keep-alive engine.
   private func stopHardwareKeepAlive() {
     guard let engine = hardwareKeepAliveEngine else { return }
+    // Clear our reference first so no new callers see a stale engine,
+    // then tear down. AVAudioEngine.stop() is synchronous and waits for
+    // the realtime thread to finish before returning.
+    hardwareKeepAliveEngine = nil
     engine.inputNode.removeTap(onBus: 0)
     engine.stop()
-    hardwareKeepAliveEngine = nil
     recordingLogger.notice("Hardware keep-alive engine stopped")
   }
+
+  // NOTE: We intentionally do NOT restart the keep-alive engine on device
+  // changes. AVAudioEngine.installTap throws an uncatchable NSException if
+  // CoreAudio's audio units are still reconfiguring (which can last many
+  // seconds during BT transitions). Instead, we stop the engine on device
+  // change and restart it only after the next recording completes — by then
+  // the device topology has fully settled. The cost is ~100ms extra latency
+  // on one recording, which is imperceptible.
 
   // MARK: - Device Guardian
 
@@ -1338,22 +1358,30 @@ actor RecordingClientLive {
     }
   }
 
-  /// Called when any device event occurs. Clears stale caches and re-pins.
-  /// Skips device pinning while recording to avoid disrupting active capture.
+  /// Called when any device event occurs. Clears stale caches, re-pins the
+  /// selected mic, and restarts the hardware keep-alive engine so it doesn't
+  /// hold a stale device reference (which causes heap corruption on the
+  /// realtime audio thread).
   private func handleDeviceChange() {
     // Invalidate caches so next resolution gets fresh data
     uidToDeviceID.removeAll()
     deviceCache.removeAll()
     lastDeviceCheck = Date()
 
+    // Always stop the keep-alive engine immediately on device change.
+    // Its realtime audio thread may be holding a stale device reference.
+    stopHardwareKeepAlive()
+
     // NEVER switch devices while recording — this causes audio disruption
-    // (e.g. AirPods reconnecting, cutting off speech)
+    // (e.g. AirPods reconnecting, cutting off speech).
+    // The keep-alive will restart after recording stops (see stopRecording).
     guard recorder?.isRecording != true else {
-      recordingLogger.notice("Device change detected during recording — deferring pin until idle")
+      recordingLogger.notice("Device change detected during recording — keep-alive stopped, deferring pin until idle")
       return
     }
 
-    // Re-pin the selected mic
+    // Re-pin the selected mic. The keep-alive engine will restart after
+    // the next recording completes (see stopRecording).
     pinSelectedDeviceAsDefault()
   }
 

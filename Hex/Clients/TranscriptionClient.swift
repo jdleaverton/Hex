@@ -109,13 +109,8 @@ actor TranscriptionClientLive {
   func downloadAndLoadModel(variant: String, progressCallback: @escaping (Progress) -> Void) async throws {
     // If Parakeet, use Parakeet client path
     if isParakeet(variant) {
-      let wasLoaded = currentModelName == variant
       try await parakeet.ensureLoaded(modelName: variant, progress: progressCallback)
       currentModelName = variant
-      // Prime the ANE pipeline on first load so the first real transcription is fast
-      if !wasLoaded {
-        await parakeet.warmup()
-      }
       return
     }
     // Resolve wildcard patterns (e.g., "distil*large-v3") to a concrete variant
@@ -166,7 +161,7 @@ actor TranscriptionClientLive {
   func deleteModel(variant: String) async throws {
     if isParakeet(variant) {
       try await parakeet.deleteCaches(modelName: variant)
-      if currentModelName == variant { await unloadCurrentModel() }
+      if currentModelName == variant { await unloadCurrentModel(reason: "modelDeleted") }
       return
     }
     let modelFolder = modelPath(for: variant)
@@ -179,7 +174,7 @@ actor TranscriptionClientLive {
 
     // If this is the currently loaded model, unload it first
     if currentModelName == variant {
-      await unloadCurrentModel()
+      await unloadCurrentModel(reason: "modelDeleted")
     }
 
     // Delete the model directory
@@ -280,14 +275,23 @@ actor TranscriptionClientLive {
       let inferenceMs = Int(Date().timeIntervalSince(startInference) * 1000)
       let totalMs = Int(Date().timeIntervalSince(startAll) * 1000)
       transcriptionLogger.notice("Parakeet pipeline — ensureLoaded: \(ensureLoadedMs)ms, audioPrepare: \(prepMs)ms, inference: \(inferenceMs)ms, total: \(totalMs)ms")
-      scheduleIdleUnload()
+      if Self.shouldCompareParakeetPaths {
+        await compareParakeetPaths(
+          url: url,
+          directText: text,
+          directPrepMs: prepMs,
+          directInferenceMs: inferenceMs,
+          directTotalMs: totalMs
+        )
+      }
+      cancelIdleUnload(reason: "parakeetSessionWarm")
       return text
     }
 
     let model = await resolveVariant(model)
     // Load or switch to the required model if needed.
     if whisperKit == nil || model != currentModelName {
-      await unloadCurrentModel()
+      await unloadCurrentModel(reason: "modelSwitched")
       let startLoad = Date()
       try await downloadAndLoadModel(variant: model) { p in
         progressCallback(p)
@@ -363,11 +367,11 @@ actor TranscriptionClientLive {
   }
 
   // Unloads any currently loaded model (clears `whisperKit` and `currentModelName`).
-  private func unloadCurrentModel() async {
+  private func unloadCurrentModel(reason: String) async {
     whisperKit = nil
-    await parakeet.unload()
+    await parakeet.unload(reason: reason)
     currentModelName = nil
-    modelsLogger.info("Unloaded model from memory")
+    modelsLogger.info("Unloaded model from memory reason=\(reason)")
   }
 
   /// Resets the idle timer. Call after every transcription completes.
@@ -382,7 +386,46 @@ actor TranscriptionClientLive {
 
   private func idleUnload() async {
     modelsLogger.notice("Idle timeout reached — unloading model to reclaim memory")
-    await unloadCurrentModel()
+    await unloadCurrentModel(reason: "idle")
+  }
+
+  private func cancelIdleUnload(reason: String) {
+    idleUnloadTask?.cancel()
+    idleUnloadTask = nil
+    modelsLogger.debug("Idle unload cancelled reason=\(reason)")
+  }
+
+  private static var shouldCompareParakeetPaths: Bool {
+    let value = ProcessInfo.processInfo.environment["HEX_PARAKEET_COMPARE_PATHS"] ?? ""
+    return value == "1" || value.lowercased() == "true"
+  }
+
+  private func compareParakeetPaths(
+    url: URL,
+    directText: String,
+    directPrepMs: Int,
+    directInferenceMs: Int,
+    directTotalMs: Int
+  ) async {
+    let startAll = Date()
+    do {
+      let startPrep = Date()
+      let prepared = try ParakeetClipPreparer.ensureMinimumDuration(url: url)
+      defer { prepared.cleanup() }
+      let prepMs = Int(Date().timeIntervalSince(startPrep) * 1000)
+
+      let startInference = Date()
+      let fileText = try await parakeet.transcribe(prepared.url)
+      let inferenceMs = Int(Date().timeIntervalSince(startInference) * 1000)
+      let totalMs = Int(Date().timeIntervalSince(startAll) * 1000)
+      let normalizedMatch = ParakeetTextNormalization.normalizedComparisonText(directText) == ParakeetTextNormalization.normalizedComparisonText(fileText)
+
+      parakeetLogger.notice(
+        "Parakeet path comparison file=\(url.lastPathComponent) directPrep=\(directPrepMs)ms directInference=\(directInferenceMs)ms directTotal=\(directTotalMs)ms filePrep=\(prepMs)ms fileInference=\(inferenceMs)ms fileTotal=\(totalMs)ms directChars=\(directText.count) fileChars=\(fileText.count) normalizedMatch=\(normalizedMatch)"
+      )
+    } catch {
+      parakeetLogger.error("Parakeet path comparison failed file=\(url.lastPathComponent) error=\(error.localizedDescription)")
+    }
   }
 
   /// Downloads the model to a temporary folder (if it isn't already on disk),

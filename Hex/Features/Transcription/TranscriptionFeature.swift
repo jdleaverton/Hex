@@ -56,6 +56,7 @@ struct TranscriptionFeature {
 
     // Model availability
     case modelMissing
+    case modelPreparationFinished
   }
 
   enum CancelID {
@@ -133,6 +134,10 @@ struct TranscriptionFeature {
         return handleTranscriptionError(&state, error: error, audioURL: audioURL)
 
       case .modelMissing:
+        return .none
+
+      case .modelPreparationFinished:
+        state.isPrewarming = false
         return .none
 
       // MARK: - Cancel/Discard Flow
@@ -291,6 +296,7 @@ private extension TranscriptionFeature {
       )
     }
     state.isRecording = true
+    state.isPrewarming = true
     let startTime = Date()
     state.recordingStartTime = startTime
     
@@ -313,6 +319,7 @@ private extension TranscriptionFeature {
       // Pre-warm the transcription model while the user is still talking.
       // This overlaps the 500ms cold-load with recording time so it's free.
       try? await transcription.ensureModelLoaded(selectedModel)
+      await send(.modelPreparationFinished)
 
       if preventSleep {
         await sleepManagement.preventSleep(reason: "Hex Voice Recording")
@@ -371,6 +378,9 @@ private extension TranscriptionFeature {
         soundEffect.play(.stopRecording)
         let capturedURL = await recording.stopRecording()
         audioURL = capturedURL
+
+        try await transcription.ensureModelLoaded(model)
+        await send(.modelPreparationFinished)
 
         // Create transcription options with the selected language
         // Note: cap concurrency to avoid audio I/O overloads on some Macs
@@ -585,15 +595,13 @@ struct TranscriptionView: View {
 #endif
 
   var status: TranscriptionIndicatorView.Status {
-    if store.isTranscribing {
-      return .transcribing
-    } else if store.isRecording {
-      return .recording
-    } else if store.isPrewarming {
-      return .prewarming
-    } else {
-      return .hidden
-    }
+    TranscriptionIndicatorView.Status(
+      TranscriptionIndicatorStatus.resolve(
+        isRecording: store.isRecording,
+        isPrewarming: store.isPrewarming,
+        isTranscribing: store.isTranscribing
+      )
+    )
   }
 
   var body: some View {
@@ -607,6 +615,23 @@ struct TranscriptionView: View {
 #if DEBUG
     .enableInjection()
 #endif
+  }
+}
+
+private extension TranscriptionIndicatorView.Status {
+  init(_ status: TranscriptionIndicatorStatus) {
+    switch status {
+    case .hidden:
+      self = .hidden
+    case .recording:
+      self = .recording
+    case .recordingPreparing:
+      self = .recordingPreparing
+    case .transcribing:
+      self = .transcribing
+    case .preparingModel:
+      self = .preparingModel
+    }
   }
 }
 

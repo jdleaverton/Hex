@@ -19,8 +19,9 @@ struct TranscriptionIndicatorView: View {
     case hidden
     case optionKeyPressed
     case recording
+    case recordingPreparing
     case transcribing
-    case prewarming
+    case preparingModel
   }
 
   var status: Status
@@ -32,8 +33,9 @@ struct TranscriptionIndicatorView: View {
     case .hidden: return Color.clear
     case .optionKeyPressed: return Color.black
     case .recording: return .red.mix(with: .black, by: 0.5).mix(with: .red, by: meter.averagePower * 3)
+    case .recordingPreparing: return .red.mix(with: transcribeBaseColor, by: 0.35).mix(with: .black, by: 0.45)
     case .transcribing: return transcribeBaseColor.mix(with: .black, by: 0.5)
-    case .prewarming: return transcribeBaseColor.mix(with: .black, by: 0.5)
+    case .preparingModel: return transcribeBaseColor.mix(with: .black, by: 0.5)
     }
   }
 
@@ -42,8 +44,9 @@ struct TranscriptionIndicatorView: View {
     case .hidden: return Color.clear
     case .optionKeyPressed: return Color.black
     case .recording: return Color.red.mix(with: .white, by: 0.1).opacity(0.6)
+    case .recordingPreparing: return Color.purple.mix(with: .white, by: 0.15).opacity(0.75)
     case .transcribing: return transcribeBaseColor.mix(with: .white, by: 0.1).opacity(0.6)
-    case .prewarming: return transcribeBaseColor.mix(with: .white, by: 0.1).opacity(0.6)
+    case .preparingModel: return transcribeBaseColor.mix(with: .white, by: 0.1).opacity(0.6)
     }
   }
 
@@ -52,8 +55,9 @@ struct TranscriptionIndicatorView: View {
     case .hidden: return Color.clear
     case .optionKeyPressed: return Color.clear
     case .recording: return Color.red
+    case .recordingPreparing: return Color.purple
     case .transcribing: return transcribeBaseColor
-    case .prewarming: return transcribeBaseColor
+    case .preparingModel: return transcribeBaseColor
     }
   }
 
@@ -80,14 +84,14 @@ struct TranscriptionIndicatorView: View {
         }
         .overlay(alignment: .center) {
           RoundedRectangle(cornerRadius: cornerRadius)
-            .fill(Color.red.opacity(status == .recording ? (averagePower < 0.1 ? averagePower / 0.1 : 1) : 0))
+            .fill(Color.red.opacity(status.isRecordingLike ? (averagePower < 0.1 ? averagePower / 0.1 : 1) : 0))
             .blur(radius: 2)
             .blendMode(.screen)
             .padding(6)
         }
         .overlay(alignment: .center) {
           RoundedRectangle(cornerRadius: cornerRadius)
-            .fill(Color.white.opacity(status == .recording ? (averagePower < 0.1 ? averagePower / 0.1 : 0.5) : 0))
+            .fill(Color.white.opacity(status.isRecordingLike ? (averagePower < 0.1 ? averagePower / 0.1 : 0.5) : 0))
             .blur(radius: 1)
             .blendMode(.screen)
             .frame(maxWidth: .infinity, alignment: .center)
@@ -96,7 +100,7 @@ struct TranscriptionIndicatorView: View {
         .overlay(alignment: .center) {
           GeometryReader { proxy in
             RoundedRectangle(cornerRadius: cornerRadius)
-              .fill(Color.red.opacity(status == .recording ? (peakPower < 0.1 ? (peakPower / 0.1) * 0.5 : 0.5) : 0))
+              .fill(Color.red.opacity(status.isRecordingLike ? (peakPower < 0.1 ? (peakPower / 0.1) * 0.5 : 0.5) : 0))
               .frame(width: max(proxy.size.width * (peakPower + 0.6), 0), height: proxy.size.height, alignment: .center)
               .frame(maxWidth: .infinity, alignment: .center)
               .blur(radius: 4)
@@ -105,16 +109,16 @@ struct TranscriptionIndicatorView: View {
         }
         .cornerRadius(cornerRadius)
         .shadow(
-          color: status == .recording ? .red.opacity(averagePower) : .red.opacity(0),
+          color: status.isRecordingLike ? .red.opacity(averagePower) : .red.opacity(0),
           radius: 4
         )
         .shadow(
-          color: status == .recording ? .red.opacity(averagePower * 0.5) : .red.opacity(0),
+          color: status.isRecordingLike ? .red.opacity(averagePower * 0.5) : .red.opacity(0),
           radius: 8
         )
         .animation(.interactiveSpring(), value: meter)
         .frame(
-          width: status == .recording ? expandedWidth : baseWidth,
+          width: status.isRecordingLike ? expandedWidth : baseWidth,
           height: baseWidth
         )
         .opacity(status == .hidden ? 0 : 1)
@@ -124,30 +128,12 @@ struct TranscriptionIndicatorView: View {
         .changeEffect(.glow(color: .red.opacity(0.5), radius: 8), value: status)
         .changeEffect(.shine(angle: .degrees(0), duration: 0.6), value: transcribeEffect)
         .compositingGroup()
-        .task(id: status == .transcribing) {
-          while status == .transcribing, !Task.isCancelled {
+        .task(id: status.isPreparingOrTranscribing) {
+          while status.isPreparingOrTranscribing, !Task.isCancelled {
             transcribeEffect += 1
             try? await Task.sleep(for: .seconds(0.25))
           }
         }
-      
-      // Show tooltip when prewarming
-      if status == .prewarming {
-        VStack(spacing: 4) {
-          Text("Model prewarming...")
-            .font(.system(size: 12, weight: .medium))
-            .foregroundColor(.white)
-            .padding(.horizontal, 8)
-            .padding(.vertical, 4)
-            .background(
-              RoundedRectangle(cornerRadius: 4)
-                .fill(Color.black.opacity(0.8))
-            )
-        }
-        .offset(y: -24)
-        .transition(.opacity)
-        .zIndex(2)
-      }
     }
 #if DEBUG
     .enableInjection()
@@ -160,8 +146,19 @@ struct TranscriptionIndicatorView: View {
     TranscriptionIndicatorView(status: .hidden, meter: .init(averagePower: 0, peakPower: 0))
     TranscriptionIndicatorView(status: .optionKeyPressed, meter: .init(averagePower: 0, peakPower: 0))
     TranscriptionIndicatorView(status: .recording, meter: .init(averagePower: 0.5, peakPower: 0.5))
+    TranscriptionIndicatorView(status: .recordingPreparing, meter: .init(averagePower: 0.5, peakPower: 0.5))
     TranscriptionIndicatorView(status: .transcribing, meter: .init(averagePower: 0, peakPower: 0))
-    TranscriptionIndicatorView(status: .prewarming, meter: .init(averagePower: 0, peakPower: 0))
+    TranscriptionIndicatorView(status: .preparingModel, meter: .init(averagePower: 0, peakPower: 0))
   }
   .padding(40)
+}
+
+private extension TranscriptionIndicatorView.Status {
+  var isRecordingLike: Bool {
+    self == .recording || self == .recordingPreparing
+  }
+
+  var isPreparingOrTranscribing: Bool {
+    self == .transcribing || self == .preparingModel || self == .recordingPreparing
+  }
 }

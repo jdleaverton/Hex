@@ -47,6 +47,13 @@ public struct HexSettings: Codable, Equatable, Sendable {
 	public var wordRemovals: [WordRemoval]
 	public var wordRemappings: [WordRemapping]
 
+	// Call Recording
+	public var callRecordingEnabled: Bool
+	public var callRecordingStoragePath: String?
+	public var callRecordingAutoCommit: Bool
+	public var callRecordingClaudeCleanup: Bool
+	public var callRecordingUserName: String
+
 	private mutating func normalizeDoubleTapSettings() {
 		if !doubleTapLockEnabled {
 			useDoubleTapOnly = false
@@ -76,7 +83,12 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		hasCompletedStorageMigration: Bool = false,
 		wordRemovalsEnabled: Bool = false,
 		wordRemovals: [WordRemoval] = HexSettings.defaultWordRemovals,
-		wordRemappings: [WordRemapping] = []
+		wordRemappings: [WordRemapping] = [],
+		callRecordingEnabled: Bool = false,
+		callRecordingStoragePath: String? = nil,
+		callRecordingAutoCommit: Bool = false,
+		callRecordingClaudeCleanup: Bool = false,
+		callRecordingUserName: String = "Me"
 	) {
 		self.soundEffectsEnabled = soundEffectsEnabled
 		self.soundEffectsVolume = soundEffectsVolume
@@ -101,6 +113,11 @@ public struct HexSettings: Codable, Equatable, Sendable {
 		self.wordRemovalsEnabled = wordRemovalsEnabled
 		self.wordRemovals = wordRemovals
 		self.wordRemappings = wordRemappings
+		self.callRecordingEnabled = callRecordingEnabled
+		self.callRecordingStoragePath = callRecordingStoragePath
+		self.callRecordingAutoCommit = callRecordingAutoCommit
+		self.callRecordingClaudeCleanup = callRecordingClaudeCleanup
+		self.callRecordingUserName = callRecordingUserName
 		normalizeDoubleTapSettings()
 	}
 
@@ -148,6 +165,11 @@ private enum HexSettingKey: String, CodingKey, CaseIterable {
 	case wordRemovalsEnabled
 	case wordRemovals
 	case wordRemappings
+	case callRecordingEnabled
+	case callRecordingStoragePath
+	case callRecordingAutoCommit
+	case callRecordingClaudeCleanup
+	case callRecordingUserName
 }
 
 private struct SettingsField<Value: Codable & Sendable> {
@@ -279,6 +301,18 @@ private enum HexSettingsSchema {
 			.wordRemappings,
 			keyPath: \.wordRemappings,
 			default: defaults.wordRemappings
-		).eraseToAny()
+		).eraseToAny(),
+		SettingsField(.callRecordingEnabled, keyPath: \.callRecordingEnabled, default: defaults.callRecordingEnabled).eraseToAny(),
+		SettingsField(
+			.callRecordingStoragePath,
+			keyPath: \.callRecordingStoragePath,
+			default: defaults.callRecordingStoragePath,
+			encode: { container, key, value in
+				try container.encodeIfPresent(value, forKey: key)
+			}
+		).eraseToAny(),
+		SettingsField(.callRecordingAutoCommit, keyPath: \.callRecordingAutoCommit, default: defaults.callRecordingAutoCommit).eraseToAny(),
+		SettingsField(.callRecordingClaudeCleanup, keyPath: \.callRecordingClaudeCleanup, default: defaults.callRecordingClaudeCleanup).eraseToAny(),
+		SettingsField(.callRecordingUserName, keyPath: \.callRecordingUserName, default: defaults.callRecordingUserName).eraseToAny()
 	]
 }

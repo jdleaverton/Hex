@@ -8,6 +8,13 @@ actor ParakeetClient {
   private var asr: AsrManager?
   private var models: AsrModels?
   private var currentVariant: ParakeetModel?
+  private var loadTask: Task<Void, Error>?
+  private var loadVariant: ParakeetModel?
+  private var loadGeneration = 0
+  /// Guards against concurrent inference. FluidAudio's AsrManager is not
+  /// safe for overlapping predictions — concurrent calls corrupt shared
+  /// MLMultiArray buffers and crash in CoreML's prediction pipeline.
+  private var isTranscribing = false
   private let logger = HexLog.parakeet
   private let vendorDirs = [
     // Our app-specific cache path convention (under XDG or {bundleID}/cache)
@@ -55,10 +62,56 @@ actor ParakeetClient {
       )
     }
     if currentVariant == variant, asr != nil { return }
+
+    if let loadTask, loadVariant == variant {
+      logger.notice("Joining in-flight Parakeet load variant=\(variant.identifier)")
+      let p = Progress(totalUnitCount: 100)
+      p.completedUnitCount = 1
+      progress(p)
+      try await loadTask.value
+      p.completedUnitCount = 100
+      progress(p)
+      return
+    }
+
+    if let loadTask, let loadVariant {
+      logger.notice("Cancelling stale Parakeet load oldVariant=\(loadVariant.identifier) newVariant=\(variant.identifier)")
+      loadTask.cancel()
+      self.loadTask = nil
+      self.loadVariant = nil
+    }
+
     if currentVariant != variant {
       asr = nil
       models = nil
     }
+
+    loadGeneration += 1
+    let generation = loadGeneration
+    let task = Task {
+      try await self.loadParakeet(variant: variant, progress: progress)
+    }
+    loadTask = task
+    loadVariant = variant
+
+    do {
+      try await task.value
+    } catch {
+      if loadGeneration == generation {
+        loadTask = nil
+        loadVariant = nil
+      }
+      logger.error("Parakeet load failed variant=\(variant.identifier) error=\(error.localizedDescription)")
+      throw error
+    }
+
+    if loadGeneration == generation {
+      loadTask = nil
+      loadVariant = nil
+    }
+  }
+
+  private func loadParakeet(variant: ParakeetModel, progress: @escaping (Progress) -> Void) async throws {
     let t0 = Date()
     logger.notice("Starting Parakeet load variant=\(variant.identifier)")
     let p = Progress(totalUnitCount: 100)
@@ -85,14 +138,17 @@ actor ParakeetClient {
 
     // Download + load the requested variant (returns when all assets are present)
     let models = try await AsrModels.downloadAndLoad(version: variant.asrVersion)
+    try Task.checkCancellation()
     self.models = models
     let manager = AsrManager(config: .init())
     try await manager.initialize(models: models)
+    try Task.checkCancellation()
     self.asr = manager
     self.currentVariant = variant
     p.completedUnitCount = 100
     progress(p)
-    logger.notice("Parakeet ensureLoaded completed in \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
+    logger.notice("Parakeet load completed variant=\(variant.identifier) elapsed=\(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
+    await warmup()
   }
 
   private func directorySize(_ dir: URL) -> UInt64? {
@@ -109,11 +165,16 @@ actor ParakeetClient {
 
   func transcribe(_ url: URL) async throws -> String {
     guard let asr else { throw NSError(domain: "Parakeet", code: -1, userInfo: [NSLocalizedDescriptionKey: "Parakeet not initialized"]) }
+    let queueStart = Date()
+    try await waitForInferenceSlot()
+    let queuedMs = Int(Date().timeIntervalSince(queueStart) * 1000)
+    defer { isTranscribing = false }
     let t0 = Date()
-    logger.notice("Transcribing with Parakeet file=\(url.lastPathComponent)")
+    logger.notice("Transcribing with Parakeet file=\(url.lastPathComponent) queuedMs=\(queuedMs)")
     let result = try await asr.transcribe(url)
-    logger.info("Parakeet transcription finished in \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
-    return Self.cleanChunkBoundaryArtifacts(result.text)
+    let inferenceMs = Int(Date().timeIntervalSince(t0) * 1000)
+    logger.info("Parakeet transcription finished queuedMs=\(queuedMs) inferenceMs=\(inferenceMs)")
+    return ParakeetTextNormalization.cleanChunkBoundaryArtifacts(result.text)
   }
 
   /// Transcribe raw 16 kHz mono Float32 samples directly, skipping file I/O.
@@ -121,41 +182,47 @@ actor ParakeetClient {
   /// with ~15s windows, 2s overlap, and 3-tier merge (contiguous/LCS/midpoint).
   func transcribe(samples: [Float]) async throws -> String {
     guard let asr else { throw NSError(domain: "Parakeet", code: -1, userInfo: [NSLocalizedDescriptionKey: "Parakeet not initialized"]) }
+    let queueStart = Date()
+    try await waitForInferenceSlot()
+    let queuedMs = Int(Date().timeIntervalSince(queueStart) * 1000)
+    defer { isTranscribing = false }
     let t0 = Date()
     let sampleCount = samples.count
     let durationSec = Double(sampleCount) / 16000.0
-    logger.notice("Transcribing with Parakeet samples=\(sampleCount) (~\(String(format: "%.1f", durationSec))s)")
+    logger.notice("Transcribing with Parakeet samples=\(sampleCount) (~\(String(format: "%.1f", durationSec))s) queuedMs=\(queuedMs)")
     let result = try await asr.transcribe(samples)
-    logger.info("Parakeet buffer transcription finished in \(String(format: "%.2f", Date().timeIntervalSince(t0)))s")
-    return Self.cleanChunkBoundaryArtifacts(result.text)
+    let inferenceMs = Int(Date().timeIntervalSince(t0) * 1000)
+    logger.info("Parakeet buffer transcription finished queuedMs=\(queuedMs) inferenceMs=\(inferenceMs)")
+    return ParakeetTextNormalization.cleanChunkBoundaryArtifacts(result.text)
   }
 
-  /// Cleans up artifacts from FluidAudio's ChunkProcessor merge.
-  ///
-  /// When audio is split into ~15s chunks, the TDT decoder appends a period at each
-  /// chunk boundary (thinking it's the end of the utterance). The 3-tier merge keeps
-  /// these as legitimate tokens, producing mid-word periods like "t.ier" or "m.erge".
-  ///
-  /// This removes periods that appear between two letters with no surrounding spaces,
-  /// which are always chunk boundary artifacts, never real punctuation.
-  private static func cleanChunkBoundaryArtifacts(_ text: String) -> String {
-    // Pattern: a letter, then period, then a lowercase letter — always a chunk artifact.
-    // Real sentence-ending periods are followed by a space or end-of-string.
-    // Abbreviations like "U.S." have periods after uppercase letters (not matched).
-    guard let regex = try? NSRegularExpression(pattern: #"(\p{L})\.(\p{Ll})"#) else {
-      return text
+  private func waitForInferenceSlot() async throws {
+    var loggedQueue = false
+    while isTranscribing {
+      if !loggedQueue {
+        logger.notice("Queueing Parakeet transcription while inference is in progress")
+        loggedQueue = true
+      }
+      try Task.checkCancellation()
+      try await Task.sleep(for: .milliseconds(20))
     }
-    let range = NSRange(text.startIndex..., in: text)
-    return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "$1$2")
+    isTranscribing = true
   }
 
   /// Release the in-memory model objects without deleting cached files on disk.
   /// The next transcription will re-load from the local cache.
-  func unload() {
+  func unload(reason: String) {
+    guard !isTranscribing else {
+      logger.warning("Skipping Parakeet unload reason=\(reason) - inference in progress")
+      return
+    }
     asr = nil
     models = nil
     currentVariant = nil
-    logger.info("Parakeet model unloaded from memory")
+    loadTask?.cancel()
+    loadTask = nil
+    loadVariant = nil
+    logger.info("Parakeet model unloaded reason=\(reason)")
   }
 
   /// Run a short silent transcription to prime the ANE pipeline.
@@ -185,6 +252,11 @@ actor ParakeetClient {
 
     // Reset live objects so a future download can proceed cleanly
     if removedAny {
+      if loadVariant == variant {
+        loadTask?.cancel()
+        loadTask = nil
+        loadVariant = nil
+      }
       self.asr = nil
       self.models = nil
       if currentVariant == variant {
@@ -249,7 +321,7 @@ actor ParakeetClient {
   }
   func transcribe(_ url: URL) async throws -> String { throw NSError(domain: "Parakeet", code: -3, userInfo: [NSLocalizedDescriptionKey: "Parakeet not available"]) }
   func transcribe(samples: [Float]) async throws -> String { throw NSError(domain: "Parakeet", code: -3, userInfo: [NSLocalizedDescriptionKey: "Parakeet not available"]) }
-  func unload() {}
+  func unload(reason: String) {}
   func warmup() async {}
   func deleteCaches(modelName: String) async throws {}
 }

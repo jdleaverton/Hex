@@ -21,6 +21,15 @@ struct HexApp: App {
             // Copy last transcript to clipboard
             MenuBarCopyLastTranscriptButton()
 
+            Divider()
+
+            // Call recording toggle
+            MenuBarCallRecordingButton(
+                store: Self.appStore.scope(state: \.callRecording, action: \.callRecording)
+            )
+
+            Divider()
+
             Button("Settings...") {
                 appDelegate.presentSettingsView()
             }.keyboardShortcut(",")

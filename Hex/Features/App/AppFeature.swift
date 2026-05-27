@@ -17,6 +17,7 @@ struct AppFeature {
     case settings
     case remappings
     case history
+    case callHistory
     case about
   }
 
@@ -25,6 +26,7 @@ struct AppFeature {
 		var transcription: TranscriptionFeature.State = .init()
 		var settings: SettingsFeature.State = .init()
 		var history: HistoryFeature.State?
+		var callRecording: CallRecordingFeature.State = .init()
 		var activeTab: ActiveTab = .settings
 		@Shared(.hexSettings) var hexSettings: HexSettings
 		@Shared(.modelBootstrapState) var modelBootstrapState: ModelBootstrapState
@@ -40,6 +42,7 @@ struct AppFeature {
     case transcription(TranscriptionFeature.Action)
     case settings(SettingsFeature.Action)
     case history(HistoryFeature.Action)
+    case callRecording(CallRecordingFeature.Action)
     case setActiveTab(ActiveTab)
     case task
     case pasteLastTranscript
@@ -70,6 +73,10 @@ struct AppFeature {
       SettingsFeature()
     }
 
+    Scope(state: \.callRecording, action: \.callRecording) {
+      CallRecordingFeature()
+    }
+
     Reduce { state, action in
       switch action {
       case .binding:
@@ -79,7 +86,8 @@ struct AppFeature {
         return .merge(
           startPasteLastTranscriptMonitoring(),
           ensureSelectedModelReadiness(),
-          startPermissionMonitoring()
+          startPermissionMonitoring(),
+          .send(.callRecording(.task))
         )
         
       case .pasteLastTranscript:
@@ -120,6 +128,9 @@ struct AppFeature {
         }
 
       case .settings:
+        return .none
+
+      case .callRecording:
         return .none
 
       case .history(.navigateToSettings):
@@ -250,6 +261,19 @@ struct AppFeature {
         }
       }
       await send(.modelStatusEvaluated(isReady))
+
+      guard isReady else {
+        HexLog.models.notice("Startup prewarm skipped model=\(selectedModel) reason=notDownloaded")
+        return
+      }
+
+      HexLog.models.notice("Startup prewarm started model=\(selectedModel)")
+      do {
+        try await transcription.ensureModelLoaded(selectedModel)
+        HexLog.models.notice("Startup prewarm completed model=\(selectedModel)")
+      } catch {
+        HexLog.models.error("Startup prewarm failed model=\(selectedModel) error=\(error.localizedDescription)")
+      }
     }
   }
 
@@ -315,6 +339,14 @@ struct AppView: View {
         .tag(AppFeature.ActiveTab.history)
 
         Button {
+          store.send(.setActiveTab(.callHistory))
+        } label: {
+          Label("Calls", systemImage: "phone.badge.waveform")
+        }
+        .buttonStyle(.plain)
+        .tag(AppFeature.ActiveTab.callHistory)
+
+        Button {
           store.send(.setActiveTab(.about))
         } label: {
           Label("About", systemImage: "info.circle")
@@ -340,6 +372,11 @@ struct AppView: View {
           HistoryView(store: historyStore)
             .navigationTitle("History")
         }
+      case .callHistory:
+        CallRecordingSettingsView(
+          store: store.scope(state: \.callRecording, action: \.callRecording)
+        )
+        .navigationTitle("Calls")
       case .about:
         AboutView(store: store.scope(state: \.settings, action: \.settings))
           .navigationTitle("About")

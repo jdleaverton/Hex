@@ -22,6 +22,8 @@ public enum HexLog {
     case history = "History"
     case settings = "Settings"
     case permissions = "Permissions"
+    case callRecording = "CallRecording"
+    case callCleanup = "CallCleanup"
   }
 
   public static func logger(_ category: Category) -> os.Logger {
@@ -42,4 +44,6 @@ public enum HexLog {
   public static let history = logger(.history)
   public static let settings = logger(.settings)
   public static let permissions = logger(.permissions)
+  public static let callRecording = logger(.callRecording)
+  public static let callCleanup = logger(.callCleanup)
 }
